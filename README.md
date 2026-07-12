@@ -3,6 +3,10 @@
 > 键盘热力图 — 可视化你的打字习惯
 
 KeyHeatmap 是一款 Windows 键盘热力图工具，在后台静默运行，实时追踪你的每一次按键，将打字数据转化为直观的热力图和统计图表。
+## 📸 截图
+
+![KeyHeatmap Dashboard](https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/screenshot.png)
+
 
 ## ✨ 功能
 
