@@ -1,9 +1,9 @@
 """
-閿洏鐑姏鍥?KeyHeatmap v3.2
-鍚庡彴璁板綍鍏ㄥ眬鎸夐敭娆℃暟锛屾墭鐩樼鐞嗭紝娴忚鍣ㄥ睍绀虹儹鍔涘浘
-鍙充笅瑙掑疄鏃舵寜閿诞绐楋紙鏈€杩?閿?+ 2绉掕繛鍑昏鏁?+ 0.5s娣″嚭锛?
-v3.2: 鏂板榧犳爣鐐瑰嚮缁熻锛圠MB/RMB/MMB锛夈€佺О鍙峰窘绔犮€佹寜閿帓琛屻€佹椂娈电儹鍥俱€佽秼鍔挎姌绾裤€佸畬鏁磋缃〉銆佷富棰樺垏鎹?
-鏀寔 GitHub Releases 鑷姩鏇存柊妫€娴?
+键盘热力图 KeyHeatmap v3.2
+后台记录全局按键次数，托盘管理，浏览器展示热力图
+右下角实时按键浮窗（最近5键 + 2秒连击计数 + 0.5s淡出）
+v3.2: 新增鼠标点击统计（LMB/RMB/MMB）、称号徽章、按键排行、时段热图、趋势折线、完整设置页、主题切换
+支持 GitHub Releases 自动更新检测
 """
 
 import json
@@ -27,12 +27,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse
 
-CURRENT_VERSION = "3.5"
+CURRENT_VERSION = "3.5.1"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
 RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe"
 
-# 鈹€鈹€鈹€ DPI 淇 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── DPI 修复 ──────────────────────────────────
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except:
@@ -41,13 +41,13 @@ except:
     except:
         pass
 
-# 鈹€鈹€鈹€ 闄勭潃鍒颁氦浜掓闈紙浠诲姟璁″垝鍚姩鏃堕渶瑕侊級鈹€鈹€
+# ─── 附着到交互桌面（任务计划启动时需要）──
 _hDesktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
 if _hDesktop:
     ctypes.windll.user32.SetThreadDesktop(_hDesktop)
     ctypes.windll.user32.CloseDesktop(_hDesktop)
 
-# 鈹€鈹€鈹€ 鏁版嵁鐩綍 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 数据目录 ──────────────────────────────────
 DATA_DIR = Path(os.environ["APPDATA"]) / "KeyHeatmap"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATS_FILE = DATA_DIR / "stats.json"
@@ -57,7 +57,7 @@ LOG_FILE = DATA_DIR / "debug.log"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 
-# 鈹€鈹€鈹€ 璁剧疆绠＄悊 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 设置管理 ──────────────────────────────────
 
 class Settings:
     def __init__(self):
@@ -116,7 +116,7 @@ class Settings:
         self.set("update_skip_until", skip_until)
 
 
-# 鈹€鈹€鈹€ 鏇存柊妫€娴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 更新检测 ──────────────────────────────────
 
 def _fetch_version_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "KeyHeatmap"})
@@ -164,7 +164,7 @@ def apply_update(downloaded_path):
         with open(bat_path, "w", encoding="gbk") as f:
             f.write("@echo off\n")
             f.write("chcp 65001 >nul\n")
-            f.write("echo 姝ｅ湪鏇存柊 KeyHeatmap...\n")
+            f.write("echo 正在更新 KeyHeatmap...\n")
             f.write("timeout /t 2 /nobreak >nul\n")
             f.write(f'taskkill /f /im "KeyHeatmap.exe" 2>nul\n')
             f.write("timeout /t 1 /nobreak >nul\n")
@@ -180,7 +180,7 @@ def apply_update(downloaded_path):
         return False
 
 
-# 鈹€鈹€鈹€ 瀵煎叆 Win32 OverlayEngine 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 导入 Win32 OverlayEngine ──────────────────
 _sys_path_extra = os.environ.get("APPDATA", "") + r"\KeyHeatmap"
 if _sys_path_extra not in sys.path:
     sys.path.insert(0, _sys_path_extra)
@@ -198,12 +198,12 @@ def log(msg):
 
 overlay_engine._log_fn = log
 
-# 鈹€鈹€鈹€ 閿洏甯冨眬瀹氫箟 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 键盘布局定义 ──────────────────────────────
 KEYBOARD_ROWS = [
     ["Esc", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"],
-    ["`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "鈱?],
+    ["`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "⌫"],
     ["Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "[", "]", "\\"],
-    ["Caps", "A", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'", "鈫?],
+    ["Caps", "A", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'", "↵"],
     ["Shift", "Z", "X", "C", "V", "B", "N", "M", ",", ".", "/", "Shift"],
     ["Ctrl", "Win", "Alt", "Sp", "Alt", "Win", "Menu", "Ctrl"],
 ]
@@ -220,8 +220,8 @@ KEY_NAME_MAP = {
     "Key.alt_l": "Alt", "Key.alt_r": "Alt",
     "Key.cmd_l": "Win", "Key.cmd_r": "Win",
     "Key.menu": "Menu",
-    "Key.space": "Sp", "Key.enter": "鈫?, "Key.backspace": "鈱?,
-    "Key.up": "鈫?, "Key.down": "鈫?, "Key.left": "鈫?, "Key.right": "鈫?,
+    "Key.space": "Sp", "Key.enter": "↵", "Key.backspace": "⌫",
+    "Key.up": "↑", "Key.down": "↓", "Key.left": "←", "Key.right": "→",
     "Key.delete": "Del", "Key.insert": "Ins",
     "Key.home": "Home", "Key.end": "End",
     "Key.page_up": "PgUp", "Key.page_down": "PgDn",
@@ -230,7 +230,7 @@ KEY_NAME_MAP = {
 }
 
 
-# 鈹€鈹€鈹€ 鏁版嵁绠＄悊 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 数据管理 ──────────────────────────────────
 
 class KeyStats:
     def __init__(self):
@@ -290,7 +290,7 @@ class KeyStats:
             if today not in self.stats["daily"]:
                 self.stats["daily"][today] = {}
             self.stats["daily"][today][key_name] = self.stats["daily"][today].get(key_name, 0) + 1
-            # 灏忔椂缁熻
+            # 小时统计
             hour = datetime.now().hour
             if today not in self.hourly:
                 self.hourly[today] = {}
@@ -318,14 +318,14 @@ class KeyStats:
             return dict(self.stats["all"])
 
     def get_hourly_data(self):
-        """杩斿洖浠婂ぉ姣忓皬鏃舵寜閿暟 {0: n, 1: n, ... 23: n}"""
+        """返回今天每小时按键数 {0: n, 1: n, ... 23: n}"""
         with self.lock:
             today = datetime.now().strftime("%Y-%m-%d")
             hdata = self.hourly.get(today, {})
             return {h: hdata.get(str(h), 0) for h in range(24)}
 
     def get_trend_data(self):
-        """杩斿洖鏈€杩?澶╂瘡鏃ユ€绘寜閿暟 {date_str: total}"""
+        """返回最近7天每日总按键数 {date_str: total}"""
         with self.lock:
             result = {}
             for i in range(6, -1, -1):
@@ -335,27 +335,27 @@ class KeyStats:
             return result
 
     def get_badge(self):
-        """鏍规嵁绱鎬绘寜閿噺鐢熸垚绉板彿"""
+        """根据累计总按键量生成称号"""
         total = sum(self.stats["all"].values())
         if total > 500000:
-            return "馃弳 閿湥"
+            return "🏆 键圣"
         elif total > 200000:
-            return "馃憫 閿殗"
+            return "👑 键皇"
         elif total > 100000:
-            return "鈿?閿畻"
+            return "⚡ 键宗"
         elif total > 50000:
-            return "馃敟 閿帇"
+            return "🔥 键王"
         elif total > 20000:
-            return "馃幆 閿洏渚?
+            return "🎯 键盘侠"
         elif total > 5000:
-            return "鈱笍 鐮佸瓧宸?
+            return "⌨️ 码字工"
         elif total > 500:
-            return "馃枈锔?鍒濆鑰?
+            return "🖊️ 初学者"
         else:
-            return "馃尡 閿洏钀屾柊"
+            return "🌱 键盘萌新"
 
     def get_ranking(self, period="all", top_n=15):
-        """杩斿洖鎸夐敭鎺掕 TOP N [(key, count), ...]"""
+        """返回按键排行 TOP N [(key, count), ...]"""
         data = self.get_data(period)
         sorted_items = sorted(data.items(), key=lambda x: x[1], reverse=True)
         return sorted_items[:top_n]
@@ -366,7 +366,7 @@ class KeyStats:
             self._make_snapshot(datetime.now().strftime("%Y-%m-%d"))
 
 
-# 鈹€鈹€鈹€ 鍙充笅瑙掓诞绐?v2 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 右下角浮窗 v2 ─────────────────────────────
 
 class KeyOverlay:
     CARD_W = 52
@@ -425,7 +425,7 @@ class KeyOverlay:
         self.canvas = tk.Canvas(self.root, highlightthickness=0, bd=0)
         self.canvas.pack(fill='both', expand=True)
 
-        # 鑾峰彇绐楀彛鍙ユ焺渚涘閮ㄤ娇鐢?
+        # 获取窗口句柄供外部使用
         try:
             self.root.update_idletasks()
             self.hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
@@ -488,7 +488,7 @@ class KeyOverlay:
             pass
 
     def schedule(self, ms, func):
-        """渚涘閮ㄧ嚎绋嬭皟搴﹀湪涓荤嚎绋嬫墽琛?""
+        """供外部线程调度在主线程执行"""
         if self.root:
             self.root.after(ms, func)
 
@@ -716,7 +716,7 @@ class KeyOverlay:
                 pass
 
 
-# 鈹€鈹€鈹€ HTML妯℃澘 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── HTML模板 ──────────────────────────────────
 
 DASHBOARD_CSS = """:root {
   --bg-body: #0d0d0d;
@@ -973,7 +973,7 @@ body {
 .chart-tooltip.show {
     opacity: 1; transform: translateY(0);
 }
-/* 鏇存柊寮圭獥 */
+/* 更新弹窗 */
 .update-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.65);
     display: flex; align-items: center; justify-content: center;
@@ -1204,7 +1204,7 @@ body {
 
 
 def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, hourly, trend, mouse_data, settings_obj, url_theme=None):
-    """鏋勫缓瀹屾暣浠〃鐩?HTML銆倀heme=瑙ｆ瀽鍚庣殑娓叉煋涓婚, url_theme=URL鍘熷鍙傛暟锛堢敤浜庡垏鎹㈠惊鐜級"""
+    """构建完整仪表盘 HTML。theme=解析后的渲染主题, url_theme=URL原始参数（用于切换循环）"""
     if url_theme is None:
         url_theme = theme
     is_light = (theme == 'light')
@@ -1215,7 +1215,7 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
 
     zero_bg = (228, 230, 235) if is_light else (38, 38, 38)
 
-    # 閿氱偣鑹蹭笌鏃舵鐑浘娓愬彉淇濇寔涓€鑷达紙瀵瑰簲 CSS --accent-from / --accent-to锛?
+    # 锚点色与时段热图渐变保持一致（对应 CSS --accent-from / --accent-to）
     if is_light:
         accent_from = (99, 102, 241)   # #6366f1
         accent_to   = (168, 85, 247)   # #a855f7
@@ -1233,7 +1233,7 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
             (1.00, to),
         ]
 
-    # 鈹€鈹€鈹€ 閿洏琛?鈹€鈹€鈹€
+    # ─── 键盘行 ───
     rows_html = ""
     for row_keys in KEYBOARD_ROWS:
         cells = []
@@ -1256,21 +1256,21 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
             width_class = ""
             if k == "Sp":
                 width_class = ' style="width:240px"'
-            elif k in ("鈱?, "Tab", "Caps", "鈫?, "Shift"):
+            elif k in ("⌫", "Tab", "Caps", "↵", "Shift"):
                 width_class = ' style="width:80px"'
             elif k == "Ctrl":
                 width_class = ' style="width:70px"'
 
             cells.append(
                 f'<div class="key" style="background:rgb({r},{g},{b})"'
-                f'{width_class} title="{k}: {count} 娆?({count*100//total if total else 0}%)">'
+                f'{width_class} title="{k}: {count} 次 ({count*100//total if total else 0}%)">'
                 f'<span class="key-label">{k}</span>'
                 f'<span class="key-count">{count}</span>'
                 f'</div>'
             )
         rows_html += f'<div class="row">{"".join(cells)}</div>\n'
 
-    # 鈹€鈹€鈹€ 榧犳爣琛?鈹€鈹€鈹€
+    # ─── 鼠标行 ───
     mouse_html = ""
     if mouse_data:
         mouse_cells = []
@@ -1290,20 +1290,20 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
                     break
             mouse_cells.append(
                 f'<div class="key mouse-key" style="background:rgb({r2},{g2},{b2});width:110px" '
-                f'title="{mk}: {mc} 娆?>'
+                f'title="{mk}: {mc} 次">'
                 f'<span class="key-label">{mk}</span>'
                 f'<span class="key-count">{mc}</span>'
                 f'</div>'
             )
         mouse_html = (
-            '<div class="mouse-row"><div class="mouse-row-label">榧犳爣鐐瑰嚮</div>'
+            '<div class="mouse-row"><div class="mouse-row-label">鼠标点击</div>'
             f'<div class="row">{"".join(mouse_cells)}</div></div>'
         )
 
-    # 鈹€鈹€鈹€ 绉板彿寰界珷 鈹€鈹€鈹€
+    # ─── 称号徽章 ───
     badge_html = f'<div class="title-wrap"><div class="title-badge">{badge}</div></div>'
 
-    # 鈹€鈹€鈹€ 鎺掕 TOP 15 鈹€鈹€鈹€
+    # ─── 排行 TOP 15 ───
     ranking_rows = ""
     max_rank_count = ranking[0][1] if ranking else 1
     for idx, (k, v) in enumerate(ranking[:15]):
@@ -1323,9 +1323,9 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
         )
 
     if not ranking_rows:
-        ranking_rows = '<div style="color:var(--text-dim);text-align:center;padding:20px;">鏆傛棤鏁版嵁</div>'
+        ranking_rows = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无数据</div>'
 
-    # 鈹€鈹€鈹€ 鏃舵鐑浘 鈹€鈹€鈹€
+    # ─── 时段热图 ───
     max_hourly = max(hourly.values()) if hourly else 1
     hourly_cols = ""
     for h in range(24):
@@ -1340,7 +1340,7 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
             f'<span class="hour-label">{label}</span></div>\n'
         )
 
-    # 鈹€鈹€鈹€ 瓒嬪娍鎶樼嚎 鈹€鈹€鈹€
+    # ─── 趋势折线 ───
     trend_dates = sorted(trend.keys())
     if trend_dates:
         max_trend = max(trend.values()) if trend else 1
@@ -1385,22 +1385,22 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
             f'</svg>'
         )
     else:
-        trend_svg = '<div style="color:var(--text-dim);text-align:center;padding:40px;">鏆傛棤瓒嬪娍鏁版嵁</div>'
+        trend_svg = '<div style="color:var(--text-dim);text-align:center;padding:40px;">暂无趋势数据</div>'
 
-    # 鈹€鈹€鈹€ 涓婚鍥炬爣 鈹€鈹€鈹€
-    theme_icons = {"light": "鈽€", "dark": "馃寵", "auto": "馃攧"}
+    # ─── 主题图标 ───
+    theme_icons = {"light": "☀", "dark": "🌙", "auto": "🔄"}
     next_theme = {"light": "dark", "dark": "auto", "auto": "light"}.get(url_theme, "dark")
 
     day_time = settings_obj.get("theme_day_time", "06:00")
     night_time = settings_obj.get("theme_night_time", "18:00")
-    mouse_toggle_html = f'<button class="mouse-toggle-btn{" on" if mouse_track else ""}" onclick="toggleMouseRanking()" id="mouseRankingBtn">{"榧犳爣鎸夐敭锛氬紑" if mouse_track else "榧犳爣鎸夐敭锛氬叧"}</button>'
+    mouse_toggle_html = f'<button class="mouse-toggle-btn{" on" if mouse_track else ""}" onclick="toggleMouseRanking()" id="mouseRankingBtn">{"鼠标按键：开" if mouse_track else "鼠标按键：关"}</button>'
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>閿洏鐑姏鍥?| KeyHeatmap</title>
+<title>键盘热力图 | KeyHeatmap</title>
 <style>
 {DASHBOARD_CSS}
 </style>
@@ -1408,50 +1408,50 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
 <body class="theme-{theme}">
 
 <div class="header">
-    <h1>閿洏鐑姏鍥?/h1>
-    <div class="sub">{period_label} - 鍒锋柊浜?{datetime.now().strftime("%H:%M:%S")}</div>
+    <h1>键盘热力图</h1>
+    <div class="sub">{period_label} - 刷新于 {datetime.now().strftime("%H:%M:%S")}</div>
 </div>
 {badge_html}
 <div class="tabs">
-    <button class="tab" onclick="switchPeriod('today')">浠婂ぉ</button>
-    <button class="tab" onclick="switchPeriod('week')">鏈懆</button>
-    <button class="tab" onclick="switchPeriod('all')">鍏ㄩ儴</button>
+    <button class="tab" onclick="switchPeriod('today')">今天</button>
+    <button class="tab" onclick="switchPeriod('week')">本周</button>
+    <button class="tab" onclick="switchPeriod('all')">全部</button>
     <span style="flex:1"></span>
-    <a class="tab tab-theme" href="/?theme={next_theme}" title="鍒囨崲涓婚">{theme_icons.get(url_theme, '馃寵')}</a>
-    <a class="tab" href="/?page=settings&theme={url_theme}" style="text-decoration:none;">璁剧疆</a>
+    <a class="tab tab-theme" href="/?theme={next_theme}" title="切换主题">{theme_icons.get(url_theme, '🌙')}</a>
+    <a class="tab" href="/?page=settings&theme={url_theme}" style="text-decoration:none;">设置</a>
 </div>
 <div class="summary">
-    鎬绘寜閿?<span>{total:,}</span> 娆?- 娑夊強 <span>{len(data)}</span> 涓敭 - 鏈€蹇欓敭 <span>{max(data, key=data.get) if data else '-'}</span>
+    总按键 <span>{total:,}</span> 次 - 涉及 <span>{len(data)}</span> 个键 - 最忙键 <span>{max(data, key=data.get) if data else '-'}</span>
 </div>
 <div class="keyboard">
 {rows_html}{mouse_html}
 </div>
-<div class="legend">浣庨 <div class="legend-bar"></div> 楂橀</div>
+<div class="legend">低频 <div class="legend-bar"></div> 高频</div>
 <div class="stats-panel">
     <div class="sub-tabs">
-        <button class="sub-tab active" onclick="switchSubTab('ranking')">鎸夐敭鎺掕</button>
-        <button class="sub-tab" onclick="switchSubTab('hourly')">鏃舵鐑浘</button>
-        <button class="sub-tab" onclick="switchSubTab('trend')">瓒嬪娍鎶樼嚎</button>
+        <button class="sub-tab active" onclick="switchSubTab('ranking')">按键排行</button>
+        <button class="sub-tab" onclick="switchSubTab('hourly')">时段热图</button>
+        <button class="sub-tab" onclick="switchSubTab('trend')">趋势折线</button>
         {mouse_toggle_html}
     </div>
     <div id="sub-ranking" class="sub-panel">
         <div class="ranking">
-            <div class="ranking-title">鎸夐敭鎺掕 TOP 15</div>
+            <div class="ranking-title">按键排行 TOP 15</div>
 {ranking_rows}
         </div>
     </div>
     <div id="sub-hourly" class="sub-panel" style="display:none">
-        <div class="panel-title">24灏忔椂鎸夐敭鍒嗗竷</div>
+        <div class="panel-title">24小时按键分布</div>
         <div class="hourly-chart">
 {hourly_cols}<div class="chart-tooltip" id="hourly-tooltip"></div></div>
     </div>
     <div id="sub-trend" class="sub-panel" style="display:none">
-        <div class="panel-title">杩?澶╄秼鍔?/div>
+        <div class="panel-title">近7天趋势</div>
         <div class="trend-wrap">
 {trend_svg}<div class="chart-tooltip" id="trend-tooltip"></div></div>
     </div>
 </div>
-<div class="footer">KeyHeatmap - 鍚庡彴榛橀粯缁熻涓?- <span id="refresh-hint">椤甸潰姣?0绉掕嚜鍔ㄥ埛鏂?/span></div>
+<div class="footer">KeyHeatmap - 后台默默统计中 - <span id="refresh-hint">页面每30秒自动刷新</span></div>
 <script>
 var THEME_PARAM = "{url_theme}";
 var DAY_TIME = "{day_time}";
@@ -1509,14 +1509,14 @@ function toggleMouseRanking() {{
     var period = params.get('period') || 'today';
     document.querySelectorAll('.tab').forEach(function(btn) {{
         btn.classList.remove('active');
-        if (btn.textContent === {{ 'today': '浠婂ぉ', 'week': '鏈懆', 'all': '鍏ㄩ儴' }}[period]) {{
+        if (btn.textContent === {{ 'today': '今天', 'week': '本周', 'all': '全部' }}[period]) {{
             btn.classList.add('active');
         }}
     }});
 }})();
 setTimeout(function() {{ location.reload(); }}, 30000);
 
-// 鏃舵鐑浘 tooltip
+// 时段热图 tooltip
 (function() {{
     var tooltip = document.getElementById('hourly-tooltip');
     if (!tooltip) return;
@@ -1525,7 +1525,7 @@ setTimeout(function() {{ location.reload(); }}, 30000);
         bar.addEventListener('mouseenter', function(e) {{
             var hour = this.getAttribute('data-hour');
             var count = this.getAttribute('data-count');
-            tooltip.textContent = hour + ':00 - ' + count + ' 娆?;
+            tooltip.textContent = hour + ':00 - ' + count + ' 次';
             tooltip.classList.add('show');
         }});
         bar.addEventListener('mousemove', function(e) {{
@@ -1539,7 +1539,7 @@ setTimeout(function() {{ location.reload(); }}, 30000);
     }});
 }})();
 
-// 瓒嬪娍鎶樼嚎 tooltip
+// 趋势折线 tooltip
 (function() {{
     var tooltip = document.getElementById('trend-tooltip');
     var band = document.getElementById('trend-band');
@@ -1548,7 +1548,7 @@ setTimeout(function() {{ location.reload(); }}, 30000);
     var dots = document.querySelectorAll('.trend-dot');
     var hoverX = parseFloat(hover.getAttribute('x'));
     var hoverW = parseFloat(hover.getAttribute('width'));
-    // 鏁版嵁鐐归棿闅?= 缁樺浘鍖哄 / (鐐规暟-1)锛屽崟鐐规椂瑕嗙洊鍏ㄥ
+    // 数据点间隔 = 绘图区宽 / (点数-1)，单点时覆盖全宽
     var interval = dots.length > 1 ? hoverW / (dots.length - 1) : hoverW;
     hover.addEventListener('mousemove', function(e) {{
         var svg = this.closest('svg');
@@ -1565,7 +1565,7 @@ setTimeout(function() {{ location.reload(); }}, 30000);
         var d = nearest.getAttribute('data-date');
         var c = nearest.getAttribute('data-count');
         var cx = parseFloat(nearest.getAttribute('cx'));
-        tooltip.textContent = d + '  ' + c + ' 娆?;
+        tooltip.textContent = d + '  ' + c + ' 次';
         tooltip.classList.add('show');
         tooltip.style.left = (mx + 15) + 'px';
         tooltip.style.top = (e.clientY - svgRect.top - 25) + 'px';
@@ -1581,15 +1581,15 @@ setTimeout(function() {{ location.reload(); }}, 30000);
     }});
 }})();
 
-/* 鈹€鈹€鈹€ 鏇存柊妫€娴?鈹€鈹€鈹€ */
+/* ─── 更新检测 ─── */
 (function() {{
     fetch('/api/check-update')
         .then(function(r) {{ return r.json(); }})
         .then(function(d) {{
             if (d.has_update) {{
                 var overlay = document.getElementById('update-overlay');
-                overlay.querySelector('.update-ver').innerHTML = '褰撳墠 v' + d.current + ' 鈫?鏈€鏂?<b>v' + d.latest + '</b>';
-                overlay.querySelector('.update-log').innerHTML = (d.changelog || '鏃犳洿鏂版棩蹇?).replace(/\\n/g, '<br>');
+                overlay.querySelector('.update-ver').innerHTML = '当前 v' + d.current + ' → 最新 <b>v' + d.latest + '</b>';
+                overlay.querySelector('.update-log').innerHTML = (d.changelog || '无更新日志').replace(/\\n/g, '<br>');
                 overlay.classList.remove('hidden');
             }}
         }})
@@ -1597,17 +1597,17 @@ setTimeout(function() {{ location.reload(); }}, 30000);
 }})();
 function doUpdate() {{
     var msg = document.getElementById('update-status');
-    msg.textContent = '姝ｅ湪涓嬭浇鏇存柊...';
+    msg.textContent = '正在下载更新...';
     fetch('/api/update/apply')
         .then(function(r) {{ return r.json(); }})
         .then(function(d) {{
             if (d.status === 'applying') {{
-                msg.textContent = '鏇存柊宸插紑濮嬶紝绋嬪簭鍗冲皢閲嶅惎...';
+                msg.textContent = '更新已开始，程序即将重启...';
             }} else {{
-                msg.textContent = '涓嬭浇澶辫触锛岃绋嶅悗閲嶈瘯';
+                msg.textContent = '下载失败，请稍后重试';
             }}
         }})
-        .catch(function(){{ msg.textContent = '鏇存柊澶辫触锛岃妫€鏌ョ綉缁?; }});
+        .catch(function(){{ msg.textContent = '更新失败，请检查网络'; }});
 }}
 function dismissUpdate() {{
     var cb = document.getElementById('update-skip-cb');
@@ -1618,16 +1618,16 @@ function dismissUpdate() {{
 }}
 </script>
 
-<!-- 鏇存柊寮圭獥 -->
+<!-- 更新弹窗 -->
 <div id="update-overlay" class="update-overlay hidden">
 <div class="update-modal">
-<h2>鍙戠幇鏂扮増鏈?/h2>
+<h2>发现新版本</h2>
 <div class="update-ver"></div>
 <div class="update-log"></div>
 <div class="update-btns">
-<div class="update-skip"><input type="checkbox" id="update-skip-cb"><label for="update-skip-cb">7澶╁唴涓嶆彁绀?/label></div>
-<button class="btn-cancel" onclick="dismissUpdate()">鍙栨秷</button>
-<button class="btn-update" onclick="doUpdate()">绔嬪嵆鏇存柊</button>
+<div class="update-skip"><input type="checkbox" id="update-skip-cb"><label for="update-skip-cb">7天内不提示</label></div>
+<button class="btn-cancel" onclick="dismissUpdate()">取消</button>
+<button class="btn-update" onclick="doUpdate()">立即更新</button>
 </div>
 <div id="update-status" class="status-msg"></div>
 </div>
@@ -1638,43 +1638,44 @@ function dismissUpdate() {{
 
 
 def build_settings_html(settings_obj, theme):
-    """鏋勫缓璁剧疆椤甸潰 HTML"""
+    """构建设置页面 HTML"""
     combo_on = settings_obj.get("combo_float_enabled", True)
     game_count_on = settings_obj.get("game_counting_enabled", True)
     glass_on = settings_obj.get("glass_enabled", True)
     mouse_track_on = settings_obj.get("mouse_tracking_enabled", False)
     mouse_overlay_on = settings_obj.get("mouse_in_overlay", False)
     auto_update_on = settings_obj.get("auto_update", True)
+    autostart_on = HeatmapHandler.tray.autostart_enabled if getattr(HeatmapHandler, "tray", None) else False
     whitelist = settings_obj.get("game_whitelist", [])
     day_time = settings_obj.get("theme_day_time", "06:00")
     night_time = settings_obj.get("theme_night_time", "18:00")
     opacity = settings_obj.get("float_opacity", 88)
-    theme_icons = {"light": "鈽€", "dark": "馃寵", "auto": "馃攧"}
+    theme_icons = {"light": "☀", "dark": "🌙", "auto": "🔄"}
     next_theme = {"light": "dark", "dark": "auto", "auto": "light"}.get(theme, "dark")
 
-    # 鐧藉悕鍗曞垪琛?
+    # 白名单列表
     wl_html = ""
     if whitelist:
         for proc in whitelist:
             wl_html += (
                 f'<span class="wl-item">{proc} '
                 f'<a href="/?page=settings&action=remove_whitelist&process={proc}&theme={theme}" '
-                f'class="wl-remove">绉婚櫎</a></span>'
+                f'class="wl-remove">移除</a></span>'
             )
     else:
-        wl_html = '<span style="color:var(--text-dim);">鏆傛棤鐧藉悕鍗曡繘绋?/span>'
+        wl_html = '<span style="color:var(--text-dim);">暂无白名单进程</span>'
 
-    # Toggle 杈呭姪
+    # Toggle 辅助
     def toggle_row(title, desc, status_on, true_text, false_text, action_url, status_color_var="var(--status-on)"):
         color = status_color_var if status_on else "var(--status-off)"
         text = true_text if status_on else false_text
         btn_class = "toggle-btn toggle-on" if status_on else "toggle-btn toggle-off"
-        btn_text = "鍏抽棴" if status_on else "寮€鍚?
+        btn_text = "关闭" if status_on else "开启"
         return f"""<div class="card">
         <div class="card-title">{title}</div>
         <div class="card-desc">{desc}</div>
         <div class="row">
-            <span style="color:var(--text-mid);font-size:13px;">褰撳墠鐘舵€侊細<b style="color:{color}">{text}</b></span>
+            <span style="color:var(--text-mid);font-size:13px;">当前状态：<b style="color:{color}">{text}</b></span>
             <a class="{btn_class}" href="/?page=settings&action={action_url}&theme={theme}">{btn_text}</a>
         </div>
     </div>"""
@@ -1685,26 +1686,26 @@ def build_settings_html(settings_obj, theme):
     var dots = 0;
     var timer = setInterval(function() {
         dots = (dots + 1) % 4;
-        status.textContent = '姝ｅ湪妫€鏌? + '.'.repeat(dots);
+        status.textContent = '正在检查' + '.'.repeat(dots);
     }, 300);
     fetch('/api/check-update')
         .then(function(r) { return r.json(); })
         .then(function(d) {
             clearInterval(timer);
             if (d.has_update) {
-                status.innerHTML = '鍙戠幇鏂扮増鏈?<b style="color:#a855f7">v' + d.latest + '</b>锛佽鍒颁华琛ㄧ洏椤甸潰杩涜鏇存柊銆?;
+                status.innerHTML = '发现新版本 <b style="color:#a855f7">v' + d.latest + '</b>！请到仪表盘页面进行更新。';
                 status.style.color = '#a855f7';
             } else if (d.current) {
-                status.textContent = '宸叉槸鏈€鏂扮増鏈?v' + d.current;
+                status.textContent = '已是最新版本 v' + d.current;
                 status.style.color = '#4ade80';
             } else {
-                status.textContent = '妫€鏌ュけ璐ワ紝璇风◢鍚庨噸璇?;
+                status.textContent = '检查失败，请稍后重试';
                 status.style.color = 'var(--text-dim)';
             }
         })
         .catch(function() {
             clearInterval(timer);
-            status.textContent = '缃戠粶閿欒锛屾棤娉曟鏌ユ洿鏂?;
+            status.textContent = '网络错误，无法检查更新';
             status.style.color = 'var(--text-dim)';
         });
 }"""
@@ -1714,26 +1715,26 @@ def build_settings_html(settings_obj, theme):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>璁剧疆 | KeyHeatmap</title>
+<title>设置 | KeyHeatmap</title>
 <style>
 {SETTINGS_CSS}
 </style>
 </head>
 <body class="theme-{theme}">
 
-<div class="header" style="margin-top:14px;"><h1>璁剧疆</h1></div>
+<div class="header" style="margin-top:14px;"><h1>设置</h1></div>
 <div class="tabs">
-    <a class="tab" href="/?theme={theme}">鐑姏鍥?/a>
-    <a class="tab active" href="/?page=settings&theme={theme}">璁剧疆</a>
+    <a class="tab" href="/?theme={theme}">热力图</a>
+    <a class="tab active" href="/?page=settings&theme={theme}">设置</a>
     <span style="flex:1"></span>
-    <a class="tab tab-theme" href="/?theme={next_theme}" title="鍒囨崲涓婚">{theme_icons.get(theme, '馃寵')}</a>
+    <a class="tab tab-theme" href="/?theme={next_theme}" title="切换主题">{theme_icons.get(theme, '🌙')}</a>
 </div>
 <div class="container">
-{toggle_row("Combo 娴獥", "鎺у埗鍙充笅瑙掓寜閿繛鍑绘诞绐楃殑鏄剧ず銆傚叧闂悗鎵€鏈夋诞绐楋紙妗岄潰鍜屾父鎴忓唴锛夐兘涓嶄細鍑虹幇銆?, combo_on, "杩愯涓?, "宸插叧闂?, "toggle_combo_float")}
-{toggle_row("娓告垙鍐呰鏁?, "鍏抽棴鍚庯紝鍦ㄧ櫧鍚嶅崟娓告垙涓殑鎸夐敭涓嶄細琚鍏ョ粺璁°€傛闈㈠簲鐢ㄧ収甯歌鏁般€?, game_count_on, "璁℃暟涓?, "宸叉殏鍋?, "toggle_game_counting")}
+{toggle_row("Combo 浮窗", "控制右下角按键连击浮窗的显示。关闭后所有浮窗（桌面和游戏内）都不会出现。", combo_on, "运行中", "已关闭", "toggle_combo_float")}
+{toggle_row("游戏内计数", "关闭后，在白名单游戏中的按键不会被计入统计。桌面应用照常计数。", game_count_on, "计数中", "已暂停", "toggle_game_counting")}
     <div class="card">
-        <div class="card-title">娓告垙鐧藉悕鍗?/div>
-        <div class="card-desc">鐧藉悕鍗曚腑鐨勮繘绋嬩細琚瘑鍒负娓告垙锛屽彈涓婅堪涓ら」璁剧疆鐨勫奖鍝嶃€傞€氳繃 Ctrl+Shift+F8 鐑敭涔熷彲蹇€熸坊鍔?绉婚櫎褰撳墠鍓嶅彴杩涚▼銆?/div>
+        <div class="card-title">游戏白名单</div>
+        <div class="card-desc">白名单中的进程会被识别为游戏，受上述两项设置的影响。通过 Ctrl+Shift+F8 热键也可快速添加/移除当前前台进程。</div>
         <div class="wl-section">
             <div class="wl-list">
 {wl_html}
@@ -1742,50 +1743,51 @@ def build_settings_html(settings_obj, theme):
                 <input type="hidden" name="page" value="settings">
                 <input type="hidden" name="action" value="add_whitelist">
                 <input type="hidden" name="theme" value="{theme}">
-                <input type="text" name="process" placeholder="杈撳叆杩涚▼鍚嶏紝濡?R6s.exe">
-                <button type="submit">娣诲姞</button>
+                <input type="text" name="process" placeholder="输入进程名，如 R6s.exe">
+                <button type="submit">添加</button>
             </form>
         </div>
     </div>
     <div class="card">
-        <div class="card-title">鑷姩涓婚鍒囨崲</div>
-        <div class="card-desc">璁剧疆鐧藉ぉ鍜屽鏅氱殑鍒囨崲鏃堕棿銆傞€夋嫨 <b>auto</b> 涓婚鍚庯紝椤甸潰浼氬湪璁惧畾鏃堕棿鑷姩鍒囨崲浜壊/鏆楄壊涓婚銆?/div>
+        <div class="card-title">自动主题切换</div>
+        <div class="card-desc">设置白天和夜晚的切换时间。选择 <b>auto</b> 主题后，页面会在设定时间自动切换亮色/暗色主题。</div>
         <form class="time-form" action="/?page=settings" method="GET">
             <input type="hidden" name="page" value="settings">
             <input type="hidden" name="action" value="save_theme_times">
             <input type="hidden" name="theme" value="{theme}">
             <div class="time-row">
-                <label>鐧藉ぉ寮€濮?/label>
+                <label>白天开始</label>
                 <input type="time" name="day_time" value="{day_time}">
-                <label>澶滄櫄寮€濮?/label>
+                <label>夜晚开始</label>
                 <input type="time" name="night_time" value="{night_time}">
-                <button type="submit">淇濆瓨</button>
+                <button type="submit">保存</button>
             </div>
         </form>
     </div>
     <div class="card">
-        <div class="card-title">娴獥閫忔槑搴?/div>
-        <div class="card-desc">鎺у埗鍙充笅瑙掓寜閿诞绐楃殑閫忔槑搴︺€?00 涓哄畬鍏ㄤ笉閫忔槑锛?0 涓烘渶閫忔槑銆?/div>
+        <div class="card-title">浮窗透明度</div>
+        <div class="card-desc">控制右下角按键浮窗的透明度。100 为完全不透明，30 为最透明。</div>
         <div class="slider-row">
             <input type="range" id="opacity-slider" min="30" max="100" value="{opacity}" oninput="document.getElementById('opacity-val').textContent=this.value">
             <span class="slider-val" id="opacity-val">{opacity}</span>
-            <button class="toggle-btn toggle-on" style="padding:6px 12px;border:none;cursor:pointer;font-size:13px;flex-shrink:0;" onclick="saveOpacity();return false;">搴旂敤</button>
+            <button class="toggle-btn toggle-on" style="padding:6px 12px;border:none;cursor:pointer;font-size:13px;flex-shrink:0;" onclick="saveOpacity();return false;">应用</button>
         </div>
     </div>
-{toggle_row("姣涚幓鐠冩晥鏋?, "涓烘诞绐楄儗鏅坊鍔犳ā绯婃晥鏋滐紝绫讳技 Windows 浜氬厠鍔涙潗璐ㄣ€傞厤鍚堝崐閫忔槑鏁堟灉鏇翠匠銆?, glass_on, "宸插惎鐢?, "宸插叧闂?, "toggle_float_blur")}
-{toggle_row("榧犳爣缁熻", "寮€鍚悗缁熻榧犳爣宸﹂敭锛圠MB锛夈€佸彸閿紙RMB锛夊拰涓敭/婊氳疆鎸夊帇锛圡MB锛夌殑鐐瑰嚮娆℃暟锛屼笌閿洏鎸夐敭涓€鍚屽睍绀哄湪鐑姏鍥句腑銆?, mouse_track_on, "宸插惎鐢?, "宸插叧闂?, "toggle_mouse_tracking")}
-{toggle_row("榧犳爣娴獥", "鎺у埗榧犳爣鐐瑰嚮鏄惁鏄剧ず鍦ㄥ彸涓嬭瀹炴椂娴獥涓€備粎褰撱€岄紶鏍囩粺璁°€嶅紑鍚椂鐢熸晥銆?, mouse_overlay_on, "宸插惎鐢?, "宸插叧闂?, "toggle_mouse_in_overlay")}
-{toggle_row("鑷姩鏇存柊", "寮€鍚悗鎵撳紑浠〃鐩樻椂浼氳嚜鍔ㄦ娴?GitHub 涓婄殑鏈€鏂扮増鏈€傚叧闂垯涓嶄細鑷姩妫€娴嬨€?, auto_update_on, "宸插惎鐢?, "宸插叧闂?, "toggle_auto_update")}
+{toggle_row("毛玻璃效果", "为浮窗背景添加模糊效果，类似 Windows 亚克力材质。配合半透明效果更佳。", glass_on, "已启用", "已关闭", "toggle_float_blur")}
+{toggle_row("鼠标统计", "开启后统计鼠标左键（LMB）、右键（RMB）和中键/滚轮按压（MMB）的点击次数，与键盘按键一同展示在热力图中。", mouse_track_on, "已启用", "已关闭", "toggle_mouse_tracking")}
+{toggle_row("鼠标浮窗", "控制鼠标点击是否显示在右下角实时浮窗中。仅当「鼠标统计」开启时生效。", mouse_overlay_on, "已启用", "已关闭", "toggle_mouse_in_overlay")}
+{toggle_row("自动更新", "开启后打开仪表盘时会自动检测 GitHub 上的最新版本。关闭则不会自动检测。", auto_update_on, "已启用", "已关闭", "toggle_auto_update")}
+{toggle_row("开机自启", "开启后 KeyHeatmap 会随 Windows 开机自动启动，无需手动打开。", autostart_on, "已启用", "已关闭", "toggle_autostart")}
     <div class="card">
-        <div class="card-title">鐗堟湰鏇存柊</div>
-        <div class="card-desc">褰撳墠鐗堟湰锛?b style="color:#a855f7">v{CURRENT_VERSION}</b>銆傜偣鍑讳笅鏂规寜閽墜鍔ㄦ娴嬫槸鍚︽湁鏂扮増鏈彲鐢ㄣ€?/div>
+        <div class="card-title">版本更新</div>
+        <div class="card-desc">当前版本：<b style="color:#a855f7">v{CURRENT_VERSION}</b>。点击下方按钮手动检测是否有新版本可用。</div>
         <div class="row" style="margin-top:12px;">
-            <a class="toggle-btn toggle-on" style="padding:8px 20px;border:none;cursor:pointer;font-size:13px;text-decoration:none;" onclick="checkUpdateNow();return false;">妫€鏌ユ洿鏂?/a>
+            <a class="toggle-btn toggle-on" style="padding:8px 20px;border:none;cursor:pointer;font-size:13px;text-decoration:none;" onclick="checkUpdateNow();return false;">检查更新</a>
             <span id="check-status" style="color:var(--text-dim);font-size:13px;margin-left:12px;"></span>
         </div>
     </div>
 </div>
-<div class="footer">KeyHeatmap - 璁剧疆瀹炴椂鐢熸晥</div>
+<div class="footer">KeyHeatmap - 设置实时生效</div>
 <script>
 var THEME_PARAM = "{theme}";
 var DAY_TIME = "{day_time}";
@@ -1838,7 +1840,7 @@ function saveOpacity() {{
 </html>"""
 
 
-# 鈹€鈹€鈹€ HTTP 鏈嶅姟鍣?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── HTTP 服务器 ───────────────────────────────
 
 class HeatmapHandler(BaseHTTPRequestHandler):
     stats: KeyStats = None
@@ -1892,7 +1894,7 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                 apply_update(downloaded)
                 self._json_response({"status": "applying"})
             else:
-                self._json_response({"error": "涓嬭浇澶辫触"}, 500)
+                self._json_response({"error": "下载失败"}, 500)
             return True
 
         if path == "/api/settings":
@@ -1962,7 +1964,7 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         return False
 
     def _handle_settings_action(self, params):
-        """澶勭悊璁剧疆椤甸潰鐨?GET 璇锋眰鍜屾搷浣?""
+        """处理设置页面的 GET 请求和操作"""
         action = params.get("action", [None])[0]
         theme = params.get("theme", ["dark"])[0]
 
@@ -2001,6 +2003,13 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         if action == "toggle_auto_update":
             current = self.settings.get("auto_update", True)
             self.settings.set("auto_update", not current)
+            self._redirect_to_settings(theme)
+            return True
+
+        if action == "toggle_autostart":
+            tray = getattr(HeatmapHandler, "tray", None)
+            if tray and hasattr(tray, "_toggle_autostart"):
+                tray._toggle_autostart()
             self._redirect_to_settings(theme)
             return True
 
@@ -2062,12 +2071,12 @@ class HeatmapHandler(BaseHTTPRequestHandler):
     def _serve_dashboard_page(self, period, theme):
         data = self.stats.get_data(period)
         max_count = max(data.values()) if data else 1
-        labels = {"today": "浠婃棩缁熻", "week": "杩?澶╃粺璁?, "all": "鍏ㄩ儴鍘嗗彶缁熻"}
+        labels = {"today": "今日统计", "week": "近7天统计", "all": "全部历史统计"}
         badge = self.stats.get_badge()
         ranking = self.stats.get_ranking(period)
         hourly = self.stats.get_hourly_data()
         trend = self.stats.get_trend_data()
-        # 榧犳爣鏁版嵁锛堢儹鍔涘浘濮嬬粓鏄剧ず锛涙帓琛屾牴鎹紑鍏宠繃婊わ級
+        # 鼠标数据（热力图始终显示；排行根据开关过滤）
         mouse_track = self.settings.get("mouse_tracking_enabled", False)
         all_data = self.stats.get_data(period)
         mouse_data = {k: all_data.get(k, 0) for k in MOUSE_KEYS}
@@ -2180,7 +2189,7 @@ class HeatmapServer:
             self.server.shutdown()
 
 
-# 鈹€鈹€鈹€ 铏氭嫙閿爜 鈫?鏄剧ず鍚嶆槧灏勶紙鐢ㄤ簬杞妯″紡锛?鈹€鈹€鈹€
+# ─── 虚拟键码 → 显示名映射（用于轮询模式） ───
 
 VK_TO_DISPLAY = {
     0x1B: "Esc",
@@ -2200,12 +2209,12 @@ VK_TO_DISPLAY = {
     0x12: "Alt", 0xA4: "Alt", 0xA5: "Alt",
     0x5B: "Win", 0x5C: "Win",
     0x5D: "Menu",
-    0x08: "鈱?, 0x09: "Tab", 0x0D: "鈫?,
+    0x08: "⌫", 0x09: "Tab", 0x0D: "↵",
     0x20: "Sp", 0x14: "Caps",
     0x2D: "Ins", 0x2E: "Del",
     0x24: "Home", 0x23: "End",
     0x21: "PgUp", 0x22: "PgDn",
-    0x25: "鈫?, 0x26: "鈫?, 0x27: "鈫?, 0x28: "鈫?,
+    0x25: "←", 0x26: "↑", 0x27: "→", 0x28: "↓",
     0x90: "NumLk",
     0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-",
     0xBE: ".", 0xBF: "/", 0xC0: "`",
@@ -2217,7 +2226,7 @@ VK_TO_DISPLAY = {
 
 _POLLING_VK_LIST = sorted(VK_TO_DISPLAY.keys())
 
-# 榧犳爣铏氭嫙閿爜
+# 鼠标虚拟键码
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
 VK_MBUTTON = 0x04
@@ -2226,7 +2235,7 @@ MOUSE_VK_MAP = {VK_LBUTTON: "LMB", VK_RBUTTON: "RMB", VK_MBUTTON: "MMB"}
 _MOUSE_VK_LIST = [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON]
 
 
-# 鈹€鈹€鈹€ 閿洏鐩戝惉 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 键盘监听 ──────────────────────────────────
 
 class KeyListener:
     def __init__(self, stats: KeyStats, overlay: KeyOverlay = None, settings: Settings = None):
@@ -2240,7 +2249,7 @@ class KeyListener:
         self._pressed_keys = set()
         self._heartbeat_stop = threading.Event()
 
-        # 杞妯″紡
+        # 轮询模式
         self._polling_thread = None
         self._polling_stop = threading.Event()
         self._polling_active = False
@@ -2249,12 +2258,12 @@ class KeyListener:
         self._switch_timer = None
         self._mode = "pynput"
 
-        # 榧犳爣杞
+        # 鼠标轮询
         self._mouse_polling_thread = None
         self._mouse_polling_stop = threading.Event()
         self._mouse_prev_state = {}
 
-        # 娓告垙鐧藉悕鍗?
+        # 游戏白名单
         self._game_whitelist = set()
         self._hotkey_cooldown = 0.0
         self._fg_proc_name = ""
@@ -2341,7 +2350,7 @@ class KeyListener:
         return False
 
     def _should_count_key(self):
-        """娓告垙鍐呰鏁板紑鍏筹細鍏抽棴鏃剁櫧鍚嶅崟娓告垙涓殑鎸夐敭涓嶈鏁?""
+        """游戏内计数开关：关闭时白名单游戏中的按键不计数"""
         game_count_on = self.settings.get("game_counting_enabled", True) if self.settings else True
         if game_count_on:
             return True
@@ -2420,7 +2429,7 @@ class KeyListener:
             log(f"polling on_press error: {e}")
 
     def _mouse_polling_loop(self):
-        """GetAsyncKeyState 杞榧犳爣鎸夐敭锛屾瘡 30ms 鎵弿涓€娆?""
+        """GetAsyncKeyState 轮询鼠标按键，每 30ms 扫描一次"""
         user32 = ctypes.windll.user32
         get_key_state = user32.GetAsyncKeyState
         get_key_state.restype = ctypes.c_short
@@ -2454,7 +2463,7 @@ class KeyListener:
                 self._mouse_prev_state[vk] = is_down
 
     def _start_mouse_polling(self):
-        """鍚姩榧犳爣杞绾跨▼锛圙etAsyncKeyState锛屼笉渚濊禆 pynput.mouse锛?""
+        """启动鼠标轮询线程（GetAsyncKeyState，不依赖 pynput.mouse）"""
         self._mouse_polling_stop.clear()
         self._mouse_polling_thread = threading.Thread(
             target=self._mouse_polling_loop, daemon=True, name="polling-mouse"
@@ -2651,7 +2660,7 @@ class KeyListener:
             log(f"listener start failed: {e}, falling back to polling")
             self._start_polling_tk()
 
-        # 鍚姩榧犳爣杞
+        # 启动鼠标轮询
         self._start_mouse_polling()
 
     def toggle_pause(self):
@@ -2667,7 +2676,7 @@ class KeyListener:
         log(f"listener stopped, total keys={self._key_count}, mode={self._mode}")
 
 
-# 鈹€鈹€鈹€ 绯荤粺鎵樼洏 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 系统托盘 ──────────────────────────────────
 
 def create_tray_icon():
     from PIL import Image, ImageDraw
@@ -2777,36 +2786,36 @@ class TrayApp:
 
     def _update_menu(self):
         from pystray import Menu, MenuItem
-        pause_label = "鈻?鎭㈠璁板綍" if self.listener.paused else "鈴?鏆傚仠璁板綍"
-        auto_label = "馃殌 寮€鏈鸿嚜鍚? 鉁? if self.autostart_enabled else "馃殌 寮€鏈鸿嚜鍚?
+        pause_label = "▶ 恢复记录" if self.listener.paused else "⏸ 暂停记录"
+        auto_label = "🚀 开机自启  ✓" if self.autostart_enabled else "🚀 开机自启"
         self.icon.menu = Menu(
-            MenuItem("馃搳 鏌ョ湅鐑姏鍥?, self._on_show, default=True),
+            MenuItem("📊 查看热力图", self._on_show, default=True),
             MenuItem(pause_label, self._on_pause),
             MenuItem(auto_label, self._on_autostart),
             Menu.SEPARATOR,
-            MenuItem("鉂?閫€鍑?, self._on_quit),
+            MenuItem("❌ 退出", self._on_quit),
         )
 
     def run(self):
         from pystray import Menu, MenuItem, Icon
         tray_icon = create_tray_icon()
-        auto_label = "馃殌 寮€鏈鸿嚜鍚? 鉁? if self.autostart_enabled else "馃殌 寮€鏈鸿嚜鍚?
+        auto_label = "🚀 开机自启  ✓" if self.autostart_enabled else "🚀 开机自启"
         menu = Menu(
-            MenuItem("馃搳 鏌ョ湅鐑姏鍥?, self._on_show, default=True),
-            MenuItem("鈴?鏆傚仠璁板綍", self._on_pause),
+            MenuItem("📊 查看热力图", self._on_show, default=True),
+            MenuItem("⏸ 暂停记录", self._on_pause),
             MenuItem(auto_label, self._on_autostart),
             Menu.SEPARATOR,
-            MenuItem("鉂?閫€鍑?, self._on_quit),
+            MenuItem("❌ 退出", self._on_quit),
         )
-        self.icon = Icon("KeyHeatmap", tray_icon, "閿洏鐑姏鍥?, menu)
+        self.icon = Icon("KeyHeatmap", tray_icon, "键盘热力图", menu)
 
-        # 鈹€鈹€鈹€ 鎵樼洏锛氭棤浜や簰妗岄潰鏃堕潤榛樿烦杩囷紝涓嶅奖鍝嶅叾浠栧姛鑳?鈹€鈹€鈹€
+        # ─── 托盘：无交互桌面时静默跳过，不影响其他功能 ───
         try:
             self.icon.run()
         except OSError as e:
             log(f"tray icon unavailable (non-interactive desktop): {e}")
-            # 鎵樼洏涓嶅彲鐢ㄤ絾绋嬪簭缁х画杩愯锛氫华琛ㄧ洏 localhost:18888銆佹诞绐椼€佹寜閿褰曞潎姝ｅ父
-            # 淇濇寔杩涚▼涓嶉€€鍑猴紝绛夊緟 Ctrl+C 鎴栦换鍔＄鐞嗗櫒鍏抽棴
+            # 托盘不可用但程序继续运行：仪表盘 localhost:18888、浮窗、按键记录均正常
+            # 保持进程不退出，等待 Ctrl+C 或任务管理器关闭
             try:
                 while True:
                     time.sleep(1)
@@ -2814,7 +2823,7 @@ class TrayApp:
                 pass
 
 
-# 鈹€鈹€鈹€ 涓诲叆鍙?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ─── 主入口 ────────────────────────────────────
 
 def main():
     log("=== KeyHeatmap v3.2 starting ===")
@@ -2850,6 +2859,7 @@ def main():
 
     log("all components started, entering tray loop")
     tray = TrayApp(stats, listener, server, overlay)
+    HeatmapHandler.tray = tray
     try:
         tray._ensure_autostart()
     except Exception as e:
