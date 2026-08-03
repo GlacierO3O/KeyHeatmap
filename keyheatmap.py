@@ -30,14 +30,14 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "4.0.0 Public Beta"
+CURRENT_VERSION = "4.0.1 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
 RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.0-public-beta/KeyHeatmap.exe"
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
-CLOUD_API_URL = "https://keyheatmap-api.onrender.com"  # 远程后端，直接走云端
+CLOUD_API_URL = "http://118.24.73.158"  # 远程后端（腾讯云轻量服务器，成都），直接走云端
 API_BASE_URL = CLOUD_API_URL or "http://127.0.0.1:8000"
 
 # ─── Authing OIDC 登录 ─────────────────────────

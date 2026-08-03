@@ -6,7 +6,7 @@ GaiaDB (MySQL 8.0) — 按键统计 & 排行榜服务
 import threading
 import time
 from datetime import date, datetime
-from typing import Optional
+from typing import List, Optional
 
 import pymysql
 from fastapi import FastAPI, HTTPException
@@ -99,7 +99,7 @@ class KeyStatItem(BaseModel):
 
 
 class UploadPayload(BaseModel):
-    items: list[KeyStatItem]
+    items: List[KeyStatItem]
 
 
 class UserInfo(BaseModel):
@@ -140,8 +140,8 @@ class LeaderboardEntry(BaseModel):
 
 
 class LeaderboardResponse(BaseModel):
-    leaderboard: list[LeaderboardEntry]
-    dates: list[str]
+    leaderboard: List[LeaderboardEntry]
+    dates: List[str]
 
 
 # ---------- Health ----------
@@ -164,10 +164,16 @@ def upload(payload: UploadPayload):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # 以本地为准覆盖：按 (user_id, stat_date) 分组，先删除该天旧数据再插入
-            dates_by_user = {}
+            # 合并仅大小写不同的按键名（Shift/SHIFT），避免撞唯一索引
+            merged = {}
             for it in payload.items:
-                dates_by_user.setdefault((it.user_id, it.stat_date), []).append(it)
+                key = (it.user_id, it.stat_date, it.key_name.casefold())
+                if key not in merged:
+                    merged[key] = [it.user_id, it.stat_date, it.key_name, 0]
+                merged[key][3] += it.count
+            dates_by_user = {}
+            for uid, stat_date, key_name, count in merged.values():
+                dates_by_user.setdefault((uid, stat_date), []).append((uid, stat_date, key_name, count))
             for (user_id, stat_date), items in dates_by_user.items():
                 cur.execute(
                     "DELETE FROM key_stats WHERE user_id = %s AND stat_date = %s",
@@ -177,7 +183,7 @@ def upload(payload: UploadPayload):
                     INSERT INTO key_stats (user_id, stat_date, key_name, count)
                     VALUES (%s, %s, %s, %s)
                 """
-                params = [(it.user_id, it.stat_date, it.key_name, it.count) for it in items]
+                params = items
                 cur.executemany(sql, params)
         conn.commit()
         return {"inserted": len(payload.items)}
