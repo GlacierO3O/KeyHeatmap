@@ -16,6 +16,9 @@ import socket
 import subprocess
 import webbrowser
 import ctypes
+import hashlib
+import base64
+import secrets
 import urllib.request
 import urllib.error
 import shutil
@@ -25,12 +28,26 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "3.3"
+CURRENT_VERSION = "3.6.0"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
 RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe"
+
+# ─── FastAPI Backend ───────────────────────────
+# 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
+CLOUD_API_URL = None  # 例如 "https://keyheatmap-api.onrender.com"
+API_BASE_URL = CLOUD_API_URL or "http://127.0.0.1:8000"
+
+# ─── Authing OIDC 登录 ─────────────────────────
+AUTHING_APP_ID = "6a689225f23676830cbafd9c"
+AUTHING_APP_SECRET = "8d0a66ca0bc74dd2e6b2cf49306419d7"
+AUTHING_DOMAIN = "yqicb6sqakca-demo.authing.cn"
+AUTHING_AUTH_URL = "https://yqicb6sqakca-demo.authing.cn/oidc/auth"
+AUTHING_TOKEN_URL = "https://yqicb6sqakca-demo.authing.cn/oidc/token"
+AUTHING_USERINFO_URL = "https://yqicb6sqakca-demo.authing.cn/oidc/me"
+AUTHING_REDIRECT_URI = "http://localhost:18888/auth/callback"
 
 # ─── DPI 修复 ──────────────────────────────────
 try:
@@ -65,10 +82,12 @@ class Settings:
         self._data = {
             "auto_update": True,
             "update_skip_until": None,
+            "last_announcement_id": None,
             "combo_float_enabled": True,
             "game_counting_enabled": True,
             "game_whitelist": [],
             "mouse_tracking_enabled": False,
+            "leaderboard_include_mouse": True,
             "mouse_in_overlay": False,
             "float_opacity": 88,
             "glass_enabled": True,
@@ -125,15 +144,17 @@ def _fetch_version_json(url):
 
 
 def check_update():
-    for url in (VERSION_URL_CDN, VERSION_URL):
+    for url in (VERSION_URL, VERSION_URL_CDN):
         try:
             data = _fetch_version_json(url)
             latest = data.get("version", "")
+            announcement = data.get("announcement")
+            announcement_history = data.get("announcement_history", [])
             if not latest:
                 continue
             if latest > CURRENT_VERSION:
-                return True, latest, data.get("notes", "")
-            return False, latest, data.get("notes", "")
+                return {"has_update": True, "latest": latest, "changelog": data.get("notes", ""), "announcement": announcement, "announcement_history": announcement_history}
+            return {"has_update": False, "latest": latest, "changelog": data.get("notes", ""), "announcement": announcement, "announcement_history": announcement_history}
         except Exception as e:
             log(f"update check failed ({url}): {e}")
     return None
@@ -178,6 +199,124 @@ def apply_update(downloaded_path):
     except Exception as e:
         log(f"apply_update failed: {e}")
         return False
+
+
+# ─── FastAPI 客户端 ────────────────────────────
+
+def _get_device_id():
+    """获取或生成设备唯一标识"""
+    did_file = DATA_DIR / "device_id.txt"
+    if did_file.exists():
+        try:
+            return did_file.read_text("utf-8").strip()
+        except:
+            pass
+    import uuid
+    did = uuid.uuid4().hex[:16]
+    did_file.write_text(did, "utf-8")
+    return did
+
+
+def _api_request(method, path, body=None):
+    """通用 API 请求，返回 (success, data_or_error)"""
+    url = f"{API_BASE_URL}{path}"
+    try:
+        data_bytes = None
+        if body is not None:
+            data_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data_bytes,
+            headers={"Content-Type": "application/json", "User-Agent": "KeyHeatmap"},
+            method=method,
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return True, result
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+            err_data = json.loads(err_body)
+            return False, err_data.get("detail", str(e))
+        except:
+            return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def api_register_user(device_id, nickname):
+    """注册/更新用户信息：POST /api/user"""
+    return _api_request("POST", "/api/user", {"device_id": device_id, "nickname": nickname})
+
+
+def api_upload_stats(items):
+    """上报统计数据：POST /api/upload
+    items: [{"user_id": str, "stat_date": "YYYY-MM-DD", "key_name": str, "count": int}, ...]
+    """
+    return _api_request("POST", "/api/upload", {"items": items})
+
+
+def api_get_leaderboard(target_date=None, limit=30, include_mouse=True):
+    """获取云端排行榜：GET /api/leaderboard
+    include_mouse=False 时排除鼠标三键（LMB/RMB/MMB）
+    """
+    path = f"/api/leaderboard?limit={limit}&include_mouse={'true' if include_mouse else 'false'}"
+    if target_date:
+        path += f"&target_date={target_date}"
+    return _api_request("GET", path)
+
+
+def api_get_keyheat(target_date=None, limit=50, include_mouse=True):
+    """获取云端按键热度排行：GET /api/keyheat
+    按 key_name 聚合所有用户的按键总次数
+    include_mouse=False 时排除鼠标三键（LMB/RMB/MMB）
+    """
+    path = f"/api/keyheat?limit={limit}&include_mouse={'true' if include_mouse else 'false'}"
+    if target_date:
+        path += f"&target_date={target_date}"
+    return _api_request("GET", path)
+
+
+def api_get_user(device_id):
+    """查询用户注册状态：GET /api/user?device_id=xxx"""
+    return _api_request("GET", f"/api/user?device_id={device_id}")
+
+
+def api_delete_user(device_id):
+    """退出排行：DELETE /api/user?device_id=xxx"""
+    return _api_request("DELETE", f"/api/user?device_id={device_id}")
+
+
+# ─── Authing OIDC (PKCE) 辅助 ──────────────────
+
+def generate_code_verifier():
+    """生成 PKCE code_verifier：3-128 字符，secrets 加密随机数"""
+    verifier = secrets.token_urlsafe(32)
+    if len(verifier) < 43:
+        verifier += secrets.token_urlsafe(8)
+    if len(verifier) > 128:
+        verifier = verifier[:128]
+    return verifier
+
+
+def generate_code_challenge(verifier):
+    """S256 生成 PKCE code_challenge：SHA256 + base64url 去掉尾随 ="""
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _decode_jwt_payload(id_token):
+    """本地解析 JWT payload 段（不校验签名，token 来自 Authing HTTPS 端点）"""
+    try:
+        parts = id_token.split(".")
+        if len(parts) != 3:
+            return {}
+        payload_b64 = parts[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 # ─── 导入 Win32 OverlayEngine ──────────────────
@@ -260,11 +399,15 @@ class KeyStats:
                 self.stats["all"] = defaultdict(int, data.get("all", {}))
                 self.stats["daily"] = data.get("daily", {})
                 self.hourly = data.get("hourly", {})
+                if "cloud_synced" in data:
+                    self.stats["cloud_synced"] = data["cloud_synced"]
             except Exception as e:
                 log(f"stats load failed: {e}")
 
     def _save(self):
         data = {"all": dict(self.stats["all"]), "daily": self.stats["daily"], "hourly": self.hourly}
+        if "cloud_synced" in self.stats:
+            data["cloud_synced"] = self.stats["cloud_synced"]
         with open(STATS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -777,7 +920,10 @@ body {
     min-height: 100vh;
     display: flex; flex-direction: column; align-items: center;
 }
-.header { text-align: center; margin-bottom: 0; }
+.header { width: 100%; display: flex; align-items: center; margin-bottom: 0; }
+.header-center { flex: 1; text-align: center; }
+.header-right { flex: 0 0 40px; display: flex; justify-content: flex-end; }
+.header-left { flex: 0 0 40px; }
 .header h1 {
     font-size: 28px; font-weight: 700;
     background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
@@ -788,7 +934,7 @@ body {
 .tab { padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-mid); transition: all 0.2s; border: none; background: transparent; }
 .tab:hover { color: var(--text-primary); }
 .tab.active { background: var(--bg-tab-active); color: var(--text-bright); box-shadow: var(--tab-shadow); }
-.tab-theme { padding: 8px 12px; font-size: 16px; }
+.tab-theme { padding: 8px 12px; font-size: 16px; text-decoration: none; }
 .summary { display: flex; gap: 30px; margin-bottom: 24px; color: var(--text-dim); font-size: 13px; }
 .summary span { color: var(--accent-from); font-weight: 600; }
 .keyboard {
@@ -833,7 +979,7 @@ body {
     color: var(--text-dim); font-weight: 700;
     flex-shrink: 0;
 }
-.rank-no.top3 { color: var(--accent-from); }
+
 .rank-key {
     width: 40px; text-align: center;
     font-weight: 600; color: var(--text-primary);
@@ -863,7 +1009,7 @@ body {
     font-size: 12px; color: var(--legend-color);
     max-width: 400px;
 }
-.legend-bar { width: 180px; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #262626, #236441, #329632, #b4b423, #e68c1c, #f52314); }
+.legend-bar { width: 180px; height: 10px; border-radius: 5px; background: linear-gradient(90deg, var(--accent-from), var(--accent-to)); }
 .mouse-row { margin-top: 14px; padding-top: 10px; border-top: 2px dashed rgba(128,128,128,0.2); }
 .mouse-row-label { text-align: center; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; letter-spacing: 0.5px; }
 .mouse-key { }
@@ -891,6 +1037,17 @@ body {
 }
 .sub-tab:hover { color: var(--text-primary); }
 .sub-tab.active { background: var(--bg-tab-active); color: var(--text-bright); box-shadow: var(--tab-shadow); }
+.mouse-toggle-btn {
+    margin-left: auto; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    font-size: 12px; font-weight: 500; border: 1px solid var(--border-color);
+    background: transparent; color: var(--text-mid); transition: all 0.2s;
+    white-space: nowrap;
+}
+.mouse-toggle-btn:hover { color: var(--text-primary); border-color: var(--accent-from); }
+.mouse-toggle-btn.on {
+    background: var(--bg-tab-active); color: var(--text-bright);
+    border-color: var(--accent-from); box-shadow: var(--tab-shadow);
+}
 .sub-panel { }
 .panel-title {
     font-size: 14px; font-weight: 600; margin-bottom: 14px;
@@ -998,12 +1155,107 @@ body {
     border: none; color: #fff; padding: 8px 24px; border-radius: 8px;
     cursor: pointer; font-size: 13px; font-weight: 600;
 }
+.update-btns .btn-github {
+    background: #24292e; border: 1px solid #444;
+    color: #c9d1d9; padding: 8px 20px; border-radius: 8px;
+    cursor: pointer; font-size: 13px;
+}
 .update-skip { display: flex; align-items: center; gap: 6px; margin-right: auto; }
 .update-skip label {
     font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;
 }
 .update-skip input { accent-color: #7c3aed; }
 .status-msg { font-size: 12px; color: var(--text-dim); margin-top: 10px; text-align: center; }
+
+/* 公告铃铛 + 红点 */
+.announce-bell {
+    position: relative; cursor: pointer; padding: 4px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 8px; transition: background 0.2s;
+}
+.announce-bell:hover { background: rgba(124,58,237,0.1); }
+.announce-bell svg { width: 18px; height: 18px; fill: var(--text-dim); transition: fill 0.2s; }
+.announce-bell:hover svg { fill: var(--text-bright); }
+.announce-bell .bell-dot {
+    position: absolute; top: 2px; right: 2px;
+    width: 7px; height: 7px; background: #ef4444;
+    border-radius: 50%; border: 2px solid var(--bg-body);
+}
+.announce-bell .bell-dot.hidden { display: none; }
+
+/* 公告历史面板 */
+.announce-history-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9997; backdrop-filter: blur(3px);
+}
+.announce-history-overlay.hidden { display: none; }
+.announce-history {
+    background: var(--bg-card); border: 1px solid rgba(124,58,237,0.2);
+    border-radius: 16px; padding: 24px 28px 20px; width: 480px; max-width: 90vw;
+    max-height: 70vh; overflow-y: auto; box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+}
+.announce-history h2 {
+    font-size: 18px; font-weight: 700; color: var(--text-bright);
+    margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+}
+.announce-history .close-btn {
+    margin-left: auto; background: transparent; border: none;
+    color: var(--text-dim); cursor: pointer; font-size: 18px; padding: 2px 6px;
+    border-radius: 6px; line-height: 1;
+}
+.announce-history .close-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-bright); }
+.announce-item {
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    padding: 14px 0; cursor: default;
+}
+.announce-item:last-child { border-bottom: none; }
+.announce-item .item-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.announce-item .item-title { font-size: 14px; font-weight: 600; color: var(--text-bright); }
+.announce-item .item-date { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+.announce-item .item-body {
+    font-size: 13px; color: var(--text-mid); line-height: 1.6;
+    padding-left: 4px;
+}
+.announce-item .item-unread {
+    width: 6px; height: 6px; background: #ef4444; border-radius: 50%; flex-shrink: 0;
+}
+.announce-empty { text-align: center; color: var(--text-dim); padding: 30px 0; font-size: 14px; }
+
+/* 公告弹窗 */
+.announce-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9998; backdrop-filter: blur(4px);
+}
+.announce-overlay.hidden { display: none; }
+.announce-modal {
+    background: var(--bg-card); border: 1px solid rgba(124,58,237,0.3);
+    border-radius: 16px; padding: 28px 32px 24px; width: 440px; max-width: 90vw;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+}
+.announce-modal h2 {
+    font-size: 20px; font-weight: 700; color: var(--text-bright);
+    margin-bottom: 2px;
+}
+.announce-modal .announce-level {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 2px 10px; border-radius: 10px; margin-bottom: 14px;
+}
+.announce-level.info { background: rgba(52,211,153,0.15); color: #34d399; }
+.announce-level.warning { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.announce-level.important { background: rgba(239,68,68,0.15); color: #ef4444; }
+.announce-modal .announce-body {
+    font-size: 14px; color: var(--text-mid); line-height: 1.7;
+    background: rgba(124,58,237,0.06); border-radius: 10px;
+    padding: 14px 18px; margin-bottom: 20px; max-height: 240px; overflow-y: auto;
+}
+.announce-btns { display: flex; justify-content: flex-end; gap: 10px; }
+.announce-btns .btn-got-it {
+    background: linear-gradient(135deg, #7c3aed, #a855f7);
+    border: none; color: #fff; padding: 8px 24px; border-radius: 8px;
+    cursor: pointer; font-size: 13px; font-weight: 600;
+}
 """
 
 
@@ -1110,7 +1362,7 @@ body {
 .tab { padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-mid); transition: all 0.2s; border: none; background: transparent; text-decoration: none; }
 .tab:hover { color: var(--text-primary); }
 .tab.active { background: var(--bg-tab-active); color: var(--text-bright); box-shadow: var(--tab-shadow); }
-.tab-theme { padding: 8px 12px; font-size: 16px; }
+.tab-theme { padding: 8px 12px; font-size: 16px; text-decoration: none; }
 .container { width: 100%; max-width: 560px; }
 .card {
     background: var(--bg-card); border-radius: 12px; padding: 20px 24px;
@@ -1188,15 +1440,63 @@ body {
     font-size: 13px; font-weight: 600; color: var(--text-primary);
     flex-shrink: 0;
 }
+/* --- 设置页分组布局 --- */
+.sg-item { display: flex; align-items: center; padding: 14px 0; border-bottom: 1px solid rgba(128,128,128,0.12); }
+.sg-item:last-child { border-bottom: none; padding-bottom: 0; }
+.sg-item:first-child { padding-top: 0; }
+.sg-info { flex: 1; min-width: 0; padding-right: 12px; }
+.sg-name { font-size: 14px; font-weight: 500; color: var(--text-primary); }
+.sg-desc { font-size: 11px; color: var(--text-dim); margin-top: 3px; line-height: 1.4; }
+.sg-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.sg-status { font-size: 12px; white-space: nowrap; }
+.sg-btn { padding: 5px 14px; border-radius: 5px; font-size: 12px; font-weight: 600; text-decoration: none; transition: all 0.15s; }
+.sg-btn.on { background: var(--btn-green); color: #fff; }
+.sg-btn.on:hover { background: var(--btn-green-hover); }
+.sg-btn.off { background: var(--toggle-off-bg); color: var(--toggle-off-text); }
+.sg-btn.off:hover { background: #555; }
+.sg-slider-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.sg-slider-row input[type="range"] { flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: var(--bg-tab-bar); outline: none; }
+.sg-slider-row input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--btn-green); cursor: pointer; }
+.sg-slider-val { width: 30px; text-align: right; font-size: 12px; font-weight: 600; color: var(--text-primary); flex-shrink: 0; }
 .footer { margin-top: 30px; text-align: center; font-size: 11px; color: var(--footer-color); }
 """
 
 
-def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, hourly, trend, mouse_data, settings_obj):
-    """构建完整仪表盘 HTML"""
-    total = sum(data.values()) if data else 1
-    if mouse_data:
+def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, hourly, trend, mouse_data, settings_obj, url_theme=None):
+    """构建完整仪表盘 HTML。theme=解析后的渲染主题, url_theme=URL原始参数（用于切换循环）"""
+    if url_theme is None:
+        url_theme = theme
+    is_light = (theme == 'light')
+    # 本地首页"包含鼠标点击"开关：控制总按键/最忙键/排行是否计入鼠标三键（默认包含，与云端对齐）
+    mouse_track = settings_obj.get("leaderboard_include_mouse", True) if settings_obj else True
+    # total：先将键盘键求和，再按开关决定是否加入鼠标三键
+    total = sum(v for k, v in data.items() if k not in MOUSE_KEYS) if data else 1
+    if mouse_track and mouse_data:
         total += sum(mouse_data.values())
+    # 展示口径数据（开关开启时合并鼠标键，关闭时仅键盘键）
+    display_data = {k: v for k, v in data.items() if k not in MOUSE_KEYS}
+    if mouse_track and mouse_data:
+        display_data.update(mouse_data)
+
+    zero_bg = (228, 230, 235) if is_light else (38, 38, 38)
+
+    # 锚点色与时段热图渐变保持一致（对应 CSS --accent-from / --accent-to）
+    if is_light:
+        accent_from = (99, 102, 241)   # #6366f1
+        accent_to   = (168, 85, 247)   # #a855f7
+    else:
+        accent_from = (52, 211, 153)   # #34d399
+        accent_to   = (244, 114, 182)  # #f472b6
+
+    def _interp_anchors(frm, to):
+        return [
+            (0.00, zero_bg),
+            (0.20, frm),
+            (0.40, tuple(int(frm[i] + (to[i] - frm[i]) * 0.25) for i in range(3))),
+            (0.60, tuple(int(frm[i] + (to[i] - frm[i]) * 0.50) for i in range(3))),
+            (0.80, tuple(int(frm[i] + (to[i] - frm[i]) * 0.75) for i in range(3))),
+            (1.00, to),
+        ]
 
     # ─── 键盘行 ───
     rows_html = ""
@@ -1207,15 +1507,8 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
             max_val = max(max_count, 1)
             log_ratio = math.log(count + 1) / math.log(max_val + 1) if count > 0 else 0.0
 
-            anchors = [
-                (0.00, (38, 38, 38)),
-                (0.15, (35, 100, 65)),
-                (0.30, (50, 150, 50)),
-                (0.50, (180, 180, 35)),
-                (0.70, (230, 140, 28)),
-                (1.00, (245, 35, 20)),
-            ]
-            r, g, b = 38, 38, 38
+            anchors = _interp_anchors(accent_from, accent_to)
+            r, g, b = zero_bg
             for i in range(len(anchors) - 1):
                 lo_r, hi_r = anchors[i][0], anchors[i + 1][0]
                 if lo_r <= log_ratio <= hi_r:
@@ -1250,15 +1543,8 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
             mc = mouse_data.get(mk, 0)
             max_val = max(max(mouse_data.values()), 1) if mouse_data else 1
             log_ratio = math.log(mc + 1) / math.log(max_val + 1) if mc > 0 else 0.0
-            anchors = [
-                (0.00, (38, 38, 38)),
-                (0.15, (35, 100, 65)),
-                (0.30, (50, 150, 50)),
-                (0.50, (180, 180, 35)),
-                (0.70, (230, 140, 28)),
-                (1.00, (245, 35, 20)),
-            ]
-            r2, g2, b2 = 38, 38, 38
+            anchors = _interp_anchors(accent_from, accent_to)
+            r2, g2, b2 = zero_bg
             for i in range(len(anchors) - 1):
                 lo_r2, hi_r2 = anchors[i][0], anchors[i + 1][0]
                 if lo_r2 <= log_ratio <= hi_r2:
@@ -1368,9 +1654,11 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
 
     # ─── 主题图标 ───
     theme_icons = {"light": "☀", "dark": "🌙", "auto": "🔄"}
+    next_theme = {"light": "dark", "dark": "auto", "auto": "light"}.get(url_theme, "dark")
 
     day_time = settings_obj.get("theme_day_time", "06:00")
     night_time = settings_obj.get("theme_night_time", "18:00")
+    mouse_toggle_html = f'<button class="mouse-toggle-btn{" on" if mouse_track else ""}" onclick="toggleLeaderboardMouse()" id="leaderboardMouseToggle" title="是否将鼠标三键(LMB/RMB/MMB)计入总按键次数、最忙键与排行">{"包含鼠标点击" if mouse_track else "排除鼠标点击"}</button>'
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
@@ -1385,20 +1673,45 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
 <body class="theme-{theme}">
 
 <div class="header">
-    <h1>键盘热力图</h1>
-    <div class="sub">{period_label} - 刷新于 {datetime.now().strftime("%H:%M:%S")}</div>
+    <div class="header-left"></div>
+    <div class="header-center">
+        <h1>键盘热力图</h1>
+        <div class="sub">{period_label} - 刷新于 {datetime.now().strftime("%H:%M:%S")}</div>
+    </div>
+    <div class="header-right">
+        <div class="announce-bell" onclick="toggleAnnounceHistory()" id="bellBtn" title="公告">
+            <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4a2 2 0 002 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+            <div class="bell-dot hidden" id="bellDot"></div>
+        </div>
+    </div>
 </div>
 {badge_html}
+
+<!-- 公告历史面板 -->
+<div class="announce-history-overlay hidden" id="announceOverlay" onclick="if(event.target===this) hideAnnounceHistory()">
+    <div class="announce-history" id="announceHistory">
+        <h2>
+            <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:var(--text-bright)"><path d="M12 22c1.1 0 2-.9 2-2h-4a2 2 0 002 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+            公告
+            <button class="close-btn" onclick="hideAnnounceHistory()">&#10005;</button>
+        </h2>
+        <div id="announceList"></div>
+    </div>
+</div>
+
 <div class="tabs">
     <button class="tab" onclick="switchPeriod('today')">今天</button>
     <button class="tab" onclick="switchPeriod('week')">本周</button>
     <button class="tab" onclick="switchPeriod('all')">全部</button>
     <span style="flex:1"></span>
-    <button class="tab tab-theme" onclick="cycleTheme()" title="切换主题">{theme_icons.get(theme, '🌙')}</button>
-    <a class="tab" href="/?page=settings&theme={theme}" style="text-decoration:none;">设置</a>
+    <a class="tab tab-theme" href="/?theme={next_theme}" title="切换主题">{theme_icons.get(url_theme, '🌙')}</a>
+    <a class="tab" href="/?page=settings&theme={url_theme}" style="text-decoration:none;">设置</a>
+    <a class="tab" href="#" onclick="location.href='/?page=cloud&theme={url_theme}&_v=4&_nc='+Date.now();return false" style="text-decoration:none;">云端排行</a>
 </div>
 <div class="summary">
-    总按键 <span>{total:,}</span> 次 - 涉及 <span>{len(data)}</span> 个键 - 最忙键 <span>{max(data, key=data.get) if data else '-'}</span>
+    总按键 <span>{total:,}</span> 次 - 涉及 <span>{len(display_data)}</span> 个键 - 最忙键 <span>{max(display_data, key=display_data.get) if display_data else '-'}</span>
+    <span style="flex:1"></span>
+    {mouse_toggle_html}
 </div>
 <div class="keyboard">
 {rows_html}{mouse_html}
@@ -1426,19 +1739,13 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
         <div class="trend-wrap">
 {trend_svg}<div class="chart-tooltip" id="trend-tooltip"></div></div>
     </div>
+
 </div>
 <div class="footer">KeyHeatmap - 后台默默统计中 - <span id="refresh-hint">页面每30秒自动刷新</span></div>
 <script>
-var THEME_PARAM = "{theme}";
+var THEME_PARAM = "{url_theme}";
 var DAY_TIME = "{day_time}";
 var NIGHT_TIME = "{night_time}";
-
-function switchSubTab(name) {{
-    document.querySelectorAll('.sub-tab').forEach(function(btn) {{ btn.classList.remove('active'); }});
-    document.querySelectorAll('.sub-panel').forEach(function(p) {{ p.style.display = 'none'; }});
-    event.target.classList.add('active');
-    document.getElementById('sub-' + name).style.display = '';
-}}
 
 function timeToMinutes(t) {{
     var parts = t.split(':');
@@ -1475,6 +1782,11 @@ function cycleTheme() {{
     window.location.search = params.toString();
 }}
 function switchPeriod(p) {{ window.location.href = '/?period=' + p + '&theme=' + THEME_PARAM; }}
+function toggleLeaderboardMouse() {{
+    fetch('/api/toggle_leaderboard_mouse')
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{ location.reload(); }});
+}}
 (function() {{
     var params = new URLSearchParams(window.location.search);
     var period = params.get('period') || 'today';
@@ -1563,6 +1875,35 @@ setTimeout(function() {{ location.reload(); }}, 30000);
                 overlay.querySelector('.update-log').innerHTML = (d.changelog || '无更新日志').replace(/\\n/g, '<br>');
                 overlay.classList.remove('hidden');
             }}
+            if (d.announcement && d.announcement.id) {{
+                fetch('/api/settings')
+                    .then(function(r) {{ return r.json(); }})
+                    .then(function(s) {{
+                        if (s.last_announcement_id !== d.announcement.id) {{
+                            var a = d.announcement;
+                            var ov = document.getElementById('announce-overlay');
+                            ov.querySelector('.announce-title').textContent = a.title || '公告';
+                            ov.querySelector('.announce-level-tag').textContent = (a.level === 'important' ? '重要' : a.level === 'warning' ? '提醒' : '通知');
+                            ov.querySelector('.announce-level-tag').className = 'announce-level ' + (a.level || 'info');
+                            ov.querySelector('.announce-body').innerHTML = (a.body || '').replace(/\\n/g, '<br>');
+                            ov.dataset.announceId = a.id;
+                            ov.classList.remove('hidden');
+                            // 弹窗出现时自动标记已读，避免下次打开再次弹出
+                            fetch('/api/announcement/read', {{
+                                method: 'POST',
+                                headers: {{ 'Content-Type': 'application/json' }},
+                                body: JSON.stringify({{ id: a.id }})
+                            }});
+                        }}
+                    }});
+            }}
+            // 公告历史 + 红点
+            var history = d.announcement_history || [];
+            if (d.announcement && d.announcement.id) {{
+                history.push(d.announcement);
+            }}
+            _allAnnouncements = history;
+            checkUnreadDot();
         }})
         .catch(function(){{}});
 }})();
@@ -1572,8 +1913,8 @@ function doUpdate() {{
     fetch('/api/update/apply')
         .then(function(r) {{ return r.json(); }})
         .then(function(d) {{
-            if (d.status === 'applying') {{
-                msg.textContent = '更新已开始，程序即将重启...';
+            if (d.status === 'downloading') {{
+                msg.textContent = '下载中，完成后自动重启...';
             }} else {{
                 msg.textContent = '下载失败，请稍后重试';
             }}
@@ -1587,6 +1928,106 @@ function dismissUpdate() {{
     }}
     document.getElementById('update-overlay').classList.add('hidden');
 }}
+function dismissAnnounce() {{
+    var ov = document.getElementById('announce-overlay');
+    var aid = ov.dataset.announceId;
+    ov.classList.add('hidden');
+    if (aid) {{
+        fetch('/api/announcement/read', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ id: aid }})
+        }});
+    }}
+}}
+var _allAnnouncements = [];
+
+function checkUnreadDot() {{
+    fetch('/api/settings')
+        .then(function(r) {{ return r.json(); }})
+        .then(function(s) {{
+            var lastId = s.last_announcement_id || '';
+            var hasUnread = false;
+            if (_allAnnouncements.length > 0) {{
+                for (var i = 0; i < _allAnnouncements.length; i++) {{
+                    if (_allAnnouncements[i].id === lastId) break;
+                    hasUnread = true; break;
+                }}
+            }}
+            var dot = document.getElementById('bellDot');
+            if (hasUnread) dot.classList.remove('hidden');
+            else dot.classList.add('hidden');
+        }});
+}}
+
+function toggleAnnounceHistory() {{
+    var ov = document.getElementById('announceOverlay');
+    if (ov.classList.contains('hidden')) {{
+        buildAnnounceList();
+        ov.classList.remove('hidden');
+    }} else {{
+        ov.classList.add('hidden');
+    }}
+}}
+
+function hideAnnounceHistory() {{
+    document.getElementById('announceOverlay').classList.add('hidden');
+}}
+
+function buildAnnounceList() {{
+    fetch('/api/settings')
+        .then(function(r) {{ return r.json(); }})
+        .then(function(s) {{
+            var lastId = s.last_announcement_id || '';
+            var list = document.getElementById('announceList');
+            if (_allAnnouncements.length === 0) {{
+                list.innerHTML = '<div class="announce-empty">暂无公告</div>';
+                return;
+            }}
+            var html = '';
+            var foundLast = !lastId;
+            for (var i = 0; i < _allAnnouncements.length; i++) {{
+                var a = _allAnnouncements[i];
+                if (!foundLast && a.id === lastId) foundLast = true;
+                var unread = (!lastId && i === _allAnnouncements.length - 1) || (!foundLast);
+                var levelLabel = a.level === 'important' ? '重要' : a.level === 'warning' ? '提醒' : '通知';
+                var levelClass = a.level || 'info';
+                html += '<div class="announce-item">'
+                    + '<div class="item-header">'
+                    + (unread ? '<div class="item-unread"></div>' : '')
+                    + '<span class="item-title">' + a.title + '</span>'
+                    + '<span style="font-size:11px;padding:1px 6px;border-radius:4px;'
+                    + (a.level==='important'?'background:rgba(239,68,68,0.15);color:#ef4444':'')
+                    + (a.level==='warning'?'background:rgba(245,158,11,0.15);color:#f59e0b':'')
+                    + (!a.level||a.level==='info'?'background:rgba(124,58,237,0.15);color:#a78bfa':'')
+                    + '">' + levelLabel + '</span>'
+                    + (a.date ? '<span class="item-date">' + a.date + '</span>' : '')
+                    + '</div>'
+                    + '<div class="item-body">' + (a.body || '').replace(/\\n/g, '<br>') + '</div>'
+                    + '</div>';
+            }}
+            list.innerHTML = html;
+
+            // mark last as read
+            var latestId = _allAnnouncements[_allAnnouncements.length - 1].id;
+            if (latestId && latestId !== lastId) {{
+                fetch('/api/announcement/read', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ id: latestId }})
+                }});
+                document.getElementById('bellDot').classList.add('hidden');
+            }}
+        }});
+}}
+
+function switchSubTab(name) {{
+    document.querySelectorAll('.sub-tab').forEach(function(btn) {{ btn.classList.remove('active'); }});
+    document.querySelectorAll('.sub-panel').forEach(function(p) {{ p.style.display = 'none'; }});
+    event.target.classList.add('active');
+    document.getElementById('sub-' + name).style.display = '';
+}}
+
 </script>
 
 <!-- 更新弹窗 -->
@@ -1599,11 +2040,551 @@ function dismissUpdate() {{
 <div class="update-skip"><input type="checkbox" id="update-skip-cb"><label for="update-skip-cb">7天内不提示</label></div>
 <button class="btn-cancel" onclick="dismissUpdate()">取消</button>
 <button class="btn-update" onclick="doUpdate()">立即更新</button>
+<button class="btn-github" onclick="window.open('https://github.com/GlacierO3O/KeyHeatmap/releases/latest')">去 GitHub 下载</button>
 </div>
 <div id="update-status" class="status-msg"></div>
 </div>
 </div>
 
+<!-- 公告弹窗 -->
+<div id="announce-overlay" class="announce-overlay hidden">
+<div class="announce-modal">
+<h2 class="announce-title"></h2>
+<span class="announce-level-tag"></span>
+<div class="announce-body"></div>
+<div class="announce-btns">
+<button class="btn-got-it" onclick="dismissAnnounce()">已读，不再提示</button>
+</div>
+</div>
+</div>
+
+</body>
+</html>"""
+
+
+def build_cloud_page_html(settings_obj, theme, url_theme=None):
+    """构建云端排行榜独立页面 HTML（含参加排行 / 登录功能）。theme=解析后的渲染主题, url_theme=URL原始参数"""
+    if url_theme is None:
+        url_theme = theme
+    theme_icons = {"light": "☀", "dark": "🌙", "auto": "🔄"}
+    next_theme = {"light": "dark", "dark": "auto", "auto": "light"}.get(url_theme, "dark")
+    day_time = settings_obj.get("theme_day_time", "06:00")
+    night_time = settings_obj.get("theme_night_time", "18:00")
+
+    return f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>云端排行榜 | KeyHeatmap</title>
+<style>
+{DASHBOARD_CSS}
+
+/* ── 用户状态区域 ── */
+#cloudUserArea {{
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; margin-bottom: 8px;
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+}}
+#cloudUserArea .user-hint {{
+    color: var(--text-dim); font-size: 13px;
+}}
+.join-btn {{
+    padding: 6px 18px; border: none; border-radius: 8px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: opacity 0.2s;
+}}
+.join-btn:hover {{ opacity: 0.85; }}
+.leave-link {{
+    display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 10px;
+    background: rgba(239,68,68,0.15); color: #ef4444;
+    font-size: 11px; font-weight: 500; text-decoration: none;
+    transition: background 0.2s;
+}}
+.leave-link:hover {{ background: rgba(239,68,68,0.3); }}
+.sync-btn {{
+    padding: 6px 18px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-secondary); color: var(--text-bright); font-size: 13px;
+    cursor: pointer; transition: all 0.2s; margin-left: 4px;
+}}
+.sync-btn:hover {{ background: var(--bg-primary); border-color: #6366f1; }}
+.sync-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+.user-badge {{
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    background: rgba(34,197,94,0.15); color: #22c55e;
+    font-size: 12px; font-weight: 600;
+}}
+.user-nickname {{
+    color: var(--text-bright); font-size: 14px; font-weight: 500;
+}}
+.edit-nickname-link {{
+    display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 10px;
+    background: rgba(99,102,241,0.15); color: #818cf8;
+    font-size: 11px; font-weight: 500; text-decoration: none;
+    transition: background 0.2s;
+}}
+.edit-nickname-link:hover {{ background: rgba(99,102,241,0.3); }}
+
+/* ── 弹窗模态层 ── */
+.modal-overlay {{
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.55); display: flex;
+    align-items: center; justify-content: center; z-index: 1000;
+}}
+.modal-box {{
+    background: var(--bg-primary); border: 1px solid var(--border);
+    border-radius: 14px; padding: 28px 32px; width: 380px; max-width: 90vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}}
+.modal-box h3 {{
+    margin: 0 0 8px 0; font-size: 18px; color: var(--text-bright);
+}}
+.modal-box p {{
+    margin: 0 0 16px 0; font-size: 13px; color: var(--text-dim);
+}}
+.modal-box input {{
+    width: 100%; box-sizing: border-box; padding: 10px 14px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-secondary); color: var(--text-bright);
+    font-size: 15px; outline: none; margin-bottom: 18px;
+}}
+.modal-box input:focus {{ border-color: #6366f1; }}
+.modal-btns {{
+    display: flex; gap: 10px; justify-content: flex-end;
+}}
+.modal-btns button {{
+    padding: 8px 20px; border: none; border-radius: 8px;
+    font-size: 14px; cursor: pointer; transition: opacity 0.2s;
+}}
+.modal-btns button:hover {{ opacity: 0.85; }}
+.modal-btn-primary {{
+    background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff;
+}}
+.modal-btn-cancel {{
+    background: var(--bg-secondary); color: var(--text-dim);
+    border: 1px solid var(--border);
+}}
+
+/* ── 云端排行昵称单行截断 ── */
+#cloudRankingList .rank-key {{
+    width: auto; max-width: 120px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+
+/* ── 云端日期选择器（已移除） ── */
+</style>
+</head>
+<body class="theme-{theme}">
+
+<div class="header" style="margin-top:14px;"><h1>云端排行榜</h1></div>
+<div class="tabs">
+    <a class="tab" href="/?theme={url_theme}" style="text-decoration:none;">热力图</a>
+    <a class="tab" href="/?page=settings&theme={url_theme}" style="text-decoration:none;">设置</a>
+    <a class="tab active" href="#" onclick="location.href='/?page=cloud&theme={url_theme}&_v=4&_nc='+Date.now();return false" style="text-decoration:none;">云端排行</a>
+    <span style="flex:1"></span>
+    <a class="tab tab-theme" href="/?page=cloud&theme={next_theme}" title="切换主题">{theme_icons.get(url_theme, '🌙')}</a>
+</div>
+
+<div class="container" style="max-width:640px;">
+    <div class="ranking" style="margin-top:16px;max-width:640px;">
+        <div class="ranking-title">
+            云端排行榜
+            <span id="cloudLoading" style="display:none;margin-left:8px;font-size:12px;color:var(--text-dim);">加载中...</span>
+        </div>
+
+        <!-- 排行维度切换：总按键排行 / 按键热度分析 -->
+        <div class="sub-tabs" style="margin-bottom:12px;">
+            <span class="sub-tab active" id="cloudTabTotal" onclick="switchCloudTab('total')">总按键排行</span>
+            <span class="sub-tab" id="cloudTabHeat" onclick="switchCloudTab('heat')">按键热度</span>
+            <span class="mouse-toggle-btn on" id="cloudMouseToggle" onclick="toggleCloudMouse()" title="是否将鼠标三键(LMB/RMB/MMB)计入总按键次数排行">包含鼠标键</span>
+        </div>
+
+        <!-- 用户状态区域 -->
+        <div id="cloudUserArea">
+            <span id="userNotRegistered">
+                <span class="user-hint">尚未参加排行</span>
+                <button class="join-btn" onclick="showJoinDialog()">参加排行</button>
+            </span>
+            <span id="userRegistered" style="display:none">
+                <span class="user-badge">已参加</span>
+                <span class="user-nickname" id="userNicknameDisplay"></span>
+                <a href="javascript:void(0)" class="edit-nickname-link" onclick="showEditNickname()">改昵称</a>
+                <a href="javascript:void(0)" class="leave-link" onclick="leaveRanking()">退出排行</a>
+                <button class="sync-btn" id="syncNowBtn" onclick="syncNow()" title="手动上传本日数据到云端">同步数据</button>
+            </span>
+            <span id="userLoading" style="display:none;color:var(--text-dim);font-size:13px;">检查中...</span>
+        </div>
+
+        <div id="cloudRankingList">
+            <div style="color:var(--text-dim);text-align:center;padding:20px;">[v3]正在加载云端数据...</div>
+        </div>
+        <!-- 按键热度分析排行（默认隐藏） -->
+        <div id="cloudHeatList" style="display:none;">
+            <div style="color:var(--text-dim);text-align:center;padding:20px;">按键热度加载中...</div>
+        </div>
+    </div>
+</div>
+
+<!-- 修改昵称弹窗 -->
+<div class="modal-overlay" id="editNicknameOverlay" style="display:none" onclick="if(event.target===this)hideEditNickname()">
+    <div class="modal-box">
+        <h3>修改昵称</h3>
+        <p>昵称将显示在云端排行榜上，不能与他人重复，且需通过敏感词检查。</p>
+        <input type="text" id="editNicknameInput" maxlength="10" placeholder="请输入新昵称（最多10字符）" autocomplete="off">
+        <div class="modal-btns">
+            <button class="modal-btn-cancel" onclick="hideEditNickname()">取消</button>
+            <button class="modal-btn-primary" id="editNicknameSubmit" onclick="submitEditNickname()">保存</button>
+        </div>
+    </div>
+</div>
+
+<div class="footer">KeyHeatmap - 云端排行榜数据来自后端服务</div>
+<script>
+document.title = "Cloud V5";
+window.addEventListener('pageshow', function(e) {{
+    if (e.persisted) {{
+        location.reload();
+    }}
+}});
+var THEME_PARAM = "{url_theme}";
+var DAY_TIME = "{day_time}";
+var NIGHT_TIME = "{night_time}";
+
+function timeToMinutes(t) {{
+    var parts = t.split(':');
+    return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+}}
+function isNightNow() {{
+    var now = new Date();
+    var cur = now.getHours() * 60 + now.getMinutes();
+    var d = timeToMinutes(DAY_TIME);
+    var n = timeToMinutes(NIGHT_TIME);
+    return cur >= n || cur < d;
+}}
+function resolveTheme(t) {{
+    if (t === 'auto') return isNightNow() ? 'dark' : 'light';
+    return t;
+}}
+function applyThemeClass() {{
+    document.body.className = 'theme-' + resolveTheme(THEME_PARAM);
+}}
+var lastThemeApplied = resolveTheme(THEME_PARAM);
+applyThemeClass();
+setInterval(function() {{
+    if (THEME_PARAM !== 'auto') return;
+    var current = resolveTheme('auto');
+    if (current !== lastThemeApplied) {{
+        lastThemeApplied = current;
+        applyThemeClass();
+    }}
+}}, 30000);
+function cycleTheme() {{
+    var next = {{'light':'dark','dark':'auto','auto':'light'}}[THEME_PARAM];
+    var params = new URLSearchParams(window.location.search);
+    params.set('theme', next);
+    window.location.search = params.toString();
+}}
+
+// ─── 参加排行 / 用户注册 ───
+
+function checkUserRegistration() {{
+    var loading = document.getElementById('userLoading');
+    var notReg = document.getElementById('userNotRegistered');
+    var reg = document.getElementById('userRegistered');
+    if (loading) loading.style.display = 'inline';
+    fetch('/api/user?device_id=default')
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            if (loading) loading.style.display = 'none';
+            if (data.device_id) currentDeviceId = data.device_id;
+            if (data.registered && data.nickname) {{
+                if (notReg) notReg.style.display = 'none';
+                if (reg) {{
+                    reg.style.display = 'inline';
+                    document.getElementById('userNicknameDisplay').textContent = data.nickname;
+                }}
+            }} else {{
+                if (notReg) notReg.style.display = 'inline';
+                if (reg) reg.style.display = 'none';
+            }}
+        }})
+        .catch(function() {{
+            if (loading) loading.style.display = 'none';
+            // 网络错误时保持默认未注册状态
+            if (notReg) notReg.style.display = 'inline';
+            if (reg) reg.style.display = 'none';
+        }});
+}}
+
+// ─── 修改昵称 ───
+
+var currentDeviceId = '';
+
+function showEditNickname() {{
+    var overlay = document.getElementById('editNicknameOverlay');
+    var input = document.getElementById('editNicknameInput');
+    if (!overlay || !input) return;
+    input.value = (document.getElementById('userNicknameDisplay') || {{}}).textContent || '';
+    overlay.style.display = 'flex';
+    input.focus();
+    input.select();
+}}
+
+function hideEditNickname() {{
+    var overlay = document.getElementById('editNicknameOverlay');
+    if (overlay) overlay.style.display = 'none';
+}}
+
+function submitEditNickname() {{
+    var input = document.getElementById('editNicknameInput');
+    var btn = document.getElementById('editNicknameSubmit');
+    var nickname = (input.value || '').trim();
+    if (!nickname) {{ alert('昵称不能为空'); return; }}
+    if (nickname.length > 20) {{ alert('昵称不能超过 20 个字符'); return; }}
+    if (!currentDeviceId) {{ alert('未获取到用户标识，请刷新页面后重试'); return; }}
+    if (!btn) return;
+    btn.disabled = true;
+    fetch('/api/user/register', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ device_id: currentDeviceId, nickname: nickname }})
+    }})
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            btn.disabled = false;
+            if (data.device_id) {{
+                document.getElementById('userNicknameDisplay').textContent = data.nickname || nickname;
+                hideEditNickname();
+                alert('昵称已更新为：' + (data.nickname || nickname));
+                loadCloudLeaderboard();
+            }} else {{
+                alert('修改失败: ' + (data.error || data.detail || '未知错误'));
+            }}
+        }})
+        .catch(function() {{
+            btn.disabled = false;
+            alert('网络请求失败，请确认服务已启动');
+        }});
+}}
+
+function showJoinDialog() {{
+    // 触发 Authing OIDC 登录：先占位打开弹窗，再获取授权 URL 跳转
+    var popup = window.open('', '_blank');
+    if (!popup) {{
+        alert('请允许浏览器弹出窗口以完成登录');
+        return;
+    }}
+    fetch('/api/auth/login')
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            if (data.redirect) {{
+                popup.location.href = data.redirect;
+            }} else {{
+                popup.close();
+                alert('登录启动失败: ' + (data.error || '未知错误'));
+            }}
+        }})
+        .catch(function() {{
+            popup.close();
+            alert('网络请求失败，请确认 KeyHeatmap 服务已启动');
+        }});
+}}
+
+function leaveRanking() {{
+    if (!confirm('确定要退出云端排行吗？\\n退出后将删除你在排行榜中的所有数据，此操作不可恢复。')) {{
+        return;
+    }}
+    fetch('/api/user?device_id=default', {{ method: 'DELETE' }})
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            if (data.deleted) {{
+                alert('已退出排行');
+                document.getElementById('userRegistered').style.display = 'none';
+                document.getElementById('userNotRegistered').style.display = 'inline';
+                loadCloudLeaderboard();
+            }} else {{
+                alert('退出失败: ' + (data.error || '未知错误'));
+            }}
+        }})
+        .catch(function() {{
+            // 后端不可用时，清除本地状态
+            document.getElementById('userRegistered').style.display = 'none';
+            document.getElementById('userNotRegistered').style.display = 'inline';
+            loadCloudLeaderboard();
+        }});
+}}
+
+function syncNow() {{
+    var btn = document.getElementById('syncNowBtn');
+    if (!btn) return;
+    if (btn.disabled) return;
+    var origText = btn.textContent;
+    btn.textContent = '同步中...';
+    btn.disabled = true;
+    fetch('/api/sync-now', {{ method: 'POST' }})
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            btn.disabled = false;
+            btn.textContent = origText;
+            if (data.ok) {{
+                loadCloudLeaderboard();
+                if (_cloudTab === 'heat') loadKeyHeat();
+            }} else {{
+                alert('同步失败: ' + (data.error || '未知错误'));
+            }}
+        }})
+        .catch(function() {{
+            btn.disabled = false;
+            btn.textContent = origText;
+            alert('网络请求失败，请确认 KeyHeatmap 后端服务已启动');
+        }});
+}}
+
+// ─── 排行榜加载 ───
+
+var _cloudLoaded = false;
+var _cloudTab = 'total';   // total=总按键排行, heat=按键热度分析
+var _includeMouse = true;  // 总按键排行是否包含鼠标三键（默认包含）
+
+function switchCloudTab(tab) {{
+    _cloudTab = tab;
+    var tabTotal = document.getElementById('cloudTabTotal');
+    var tabHeat = document.getElementById('cloudTabHeat');
+    var list = document.getElementById('cloudRankingList');
+    var heat = document.getElementById('cloudHeatList');
+    if (tabTotal) tabTotal.className = 'sub-tab' + (tab === 'total' ? ' active' : '');
+    if (tabHeat) tabHeat.className = 'sub-tab' + (tab === 'heat' ? ' active' : '');
+    if (list) list.style.display = (tab === 'total') ? '' : 'none';
+    if (heat) heat.style.display = (tab === 'heat') ? '' : 'none';
+    if (tab === 'heat') {{
+        loadKeyHeat();
+    }} else {{
+        loadCloudLeaderboard();
+    }}
+}}
+
+function toggleCloudMouse() {{
+    _includeMouse = !_includeMouse;
+    var btn = document.getElementById('cloudMouseToggle');
+    if (!btn) return;
+    btn.className = 'mouse-toggle-btn' + (_includeMouse ? ' on' : '');
+    btn.textContent = _includeMouse ? '包含鼠标键' : '排除鼠标键';
+    if (_cloudTab === 'heat') {{
+        loadKeyHeat();
+    }} else {{
+        loadCloudLeaderboard();
+    }}
+}}
+
+
+function loadCloudLeaderboard() {{
+    var loading = document.getElementById('cloudLoading');
+    var list = document.getElementById('cloudRankingList');
+    if (loading) loading.style.display = 'inline';
+    // 只查询当天数据，不再支持历史日期选择
+    var _d = new Date();
+    var _td = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
+    var url = '/api/leaderboard/cloud?limit=30&include_mouse=' + (_includeMouse ? 'true' : 'false') + '&target_date=' + encodeURIComponent(_td);
+    fetch(url)
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            try {{
+                if (loading) loading.style.display = 'none';
+                _cloudLoaded = true;
+                if (data.error && data.leaderboard === null) {{
+                    if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
+                    return;
+                }}
+                var lb = data.leaderboard || [];
+                if (lb.length === 0) {{
+                    if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无云端数据</div>';
+                    return;
+                }}
+                var maxCount = lb[0].total_count || 1;
+                var html = '';
+                lb.forEach(function(row, idx) {{
+                    var pct = Math.round((row.total_count || 0) / maxCount * 100);
+                    var rankCls = '';
+                    if (idx === 0) rankCls = ' top1';
+                    else if (idx === 1) rankCls = ' top2';
+                    else if (idx === 2) rankCls = ' top3';
+                    html += '<div class="rank-row">' +
+                        '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
+                        '<span class="rank-key">' + (row.nickname || row.user_id || '???') + '</span>' +
+                        '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
+                        '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
+                }});
+                if (list) list.innerHTML = html;
+            }} catch(e) {{
+                if (loading) loading.style.display = 'none';
+                if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">数据解析失败: ' + (e.message || '未知') + '</div>';
+            }}
+        }})
+        .catch(function() {{
+            if (loading) loading.style.display = 'none';
+            if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">网络请求失败，请确认 KeyHeatmap 后端服务已启动</div>';
+        }});
+}}
+
+// ─── 按键热度分析排行（所有用户每个按键的总次数） ───
+
+function loadKeyHeat() {{
+    var loading = document.getElementById('cloudLoading');
+    var list = document.getElementById('cloudHeatList');
+    if (loading) loading.style.display = 'inline';
+    // 只查询当天数据，不再支持历史日期选择
+    var _d = new Date();
+    var _td = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
+    var url = '/api/keyheat/cloud?limit=50&include_mouse=' + (_includeMouse ? 'true' : 'false') + '&target_date=' + encodeURIComponent(_td);
+    fetch(url)
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            try {{
+                if (loading) loading.style.display = 'none';
+                if (data.error && data.ranking === null) {{
+                    if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
+                    return;
+                }}
+                var rows = data.ranking || [];
+                if (rows.length === 0) {{
+                    if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无按键热度数据</div>';
+                    return;
+                }}
+                var maxCount = rows[0].total_count || 1;
+                var html = '';
+                rows.forEach(function(row, idx) {{
+                    var pct = Math.round((row.total_count || 0) / maxCount * 100);
+                    var rankCls = '';
+                    if (idx === 0) rankCls = ' top1';
+                    else if (idx === 1) rankCls = ' top2';
+                    else if (idx === 2) rankCls = ' top3';
+                    html += '<div class="rank-row">' +
+                        '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
+                        '<span class="rank-key">' + (row.key_name || '???') + '</span>' +
+                        '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
+                        '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
+                }});
+                if (list) list.innerHTML = html;
+            }} catch(e) {{
+                if (loading) loading.style.display = 'none';
+                if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">数据解析失败: ' + (e.message || '未知') + '</div>';
+            }}
+        }})
+        .catch(function() {{
+            if (loading) loading.style.display = 'none';
+            if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">网络请求失败，请确认 KeyHeatmap 后端服务已启动</div>';
+        }});
+}}
+
+checkUserRegistration();
+loadCloudLeaderboard();
+</script>
 </body>
 </html>"""
 
@@ -1616,11 +2597,14 @@ def build_settings_html(settings_obj, theme):
     mouse_track_on = settings_obj.get("mouse_tracking_enabled", False)
     mouse_overlay_on = settings_obj.get("mouse_in_overlay", False)
     auto_update_on = settings_obj.get("auto_update", True)
+    autostart_on = HeatmapHandler.tray.autostart_enabled if getattr(HeatmapHandler, "tray", None) else False
+    shortcut_on = HeatmapHandler.tray._check_desktop_shortcut() if getattr(HeatmapHandler, "tray", None) else False
     whitelist = settings_obj.get("game_whitelist", [])
     day_time = settings_obj.get("theme_day_time", "06:00")
     night_time = settings_obj.get("theme_night_time", "18:00")
     opacity = settings_obj.get("float_opacity", 88)
     theme_icons = {"light": "☀", "dark": "🌙", "auto": "🔄"}
+    next_theme = {"light": "dark", "dark": "auto", "auto": "light"}.get(theme, "dark")
 
     # 白名单列表
     wl_html = ""
@@ -1648,6 +2632,22 @@ def build_settings_html(settings_obj, theme):
             <a class="{btn_class}" href="/?page=settings&action={action_url}&theme={theme}">{btn_text}</a>
         </div>
     </div>"""
+
+    def sg_toggle(title, desc, status_on, true_text, false_text, action_url):
+        color = "var(--status-on)" if status_on else "var(--status-off)"
+        text = true_text if status_on else false_text
+        btn_class = "sg-btn on" if status_on else "sg-btn off"
+        btn_text = "关闭" if status_on else "开启"
+        return f'''<div class="sg-item">
+    <div class="sg-info">
+        <div class="sg-name">{title}</div>
+        <div class="sg-desc">{desc}</div>
+    </div>
+    <div class="sg-right">
+        <span class="sg-status" style="color:{color}">{text}</span>
+        <a class="{btn_class}" href="/?page=settings&action={action_url}&theme={theme}">{btn_text}</a>
+    </div>
+</div>'''
 
     CHECK_UPDATE_JS = """function checkUpdateNow() {
     var status = document.getElementById('check-status');
@@ -1693,67 +2693,97 @@ def build_settings_html(settings_obj, theme):
 
 <div class="header" style="margin-top:14px;"><h1>设置</h1></div>
 <div class="tabs">
-    <a class="tab" href="/?theme={theme}">热力图</a>
-    <a class="tab active" href="/?page=settings&theme={theme}">设置</a>
+    <a class="tab" href="/?theme={theme}" style="text-decoration:none;">热力图</a>
+    <a class="tab active" href="/?page=settings&theme={theme}" style="text-decoration:none;">设置</a>
+    <a class="tab" href="#" onclick="location.href='/?page=cloud&theme={theme}&_v=4&_nc='+Date.now();return false" style="text-decoration:none;">云端排行</a>
     <span style="flex:1"></span>
-    <button class="tab tab-theme" onclick="cycleTheme()" title="切换主题">{theme_icons.get(theme, '🌙')}</button>
+    <a class="tab tab-theme" href="/?theme={next_theme}" title="切换主题">{theme_icons.get(theme, '🌙')}</a>
 </div>
 <div class="container">
-{toggle_row("Combo 浮窗", "控制右下角按键连击浮窗的显示。关闭后所有浮窗（桌面和游戏内）都不会出现。", combo_on, "运行中", "已关闭", "toggle_combo_float")}
-{toggle_row("游戏内计数", "关闭后，在白名单游戏中的按键不会被计入统计。桌面应用照常计数。", game_count_on, "计数中", "已暂停", "toggle_game_counting")}
+
     <div class="card">
-        <div class="card-title">游戏白名单</div>
-        <div class="card-desc">白名单中的进程会被识别为游戏，受上述两项设置的影响。通过 Ctrl+Shift+F8 热键也可快速添加/移除当前前台进程。</div>
-        <div class="wl-section">
-            <div class="wl-list">
+        <div class="card-title">快捷方式</div>
+{sg_toggle("桌面快捷方式", "在桌面上创建 KeyHeatmap 快捷方式，方便快速启动。再次点击可删除。", shortcut_on, "已创建", "未创建", "toggle_desktop_shortcut")}
+{sg_toggle("开机自启", "开启后 KeyHeatmap 会随 Windows 开机自动启动，无需手动打开。", autostart_on, "已启用", "已关闭", "toggle_autostart")}
+    </div>
+
+    <div class="card">
+        <div class="card-title">浮窗显示</div>
+{sg_toggle("Combo 浮窗", "控制右下角按键连击浮窗的显示。关闭后所有浮窗（桌面和游戏内）都不会出现。", combo_on, "运行中", "已关闭", "toggle_combo_float")}
+{sg_toggle("鼠标浮窗", "控制鼠标点击是否显示在右下角实时浮窗中。仅当「鼠标统计」开启时生效。", mouse_overlay_on, "已启用", "已关闭", "toggle_mouse_in_overlay")}
+        <div class="sg-item">
+            <div class="sg-info">
+                <div class="sg-name">浮窗透明度</div>
+                <div class="sg-desc">控制右下角按键浮窗的透明度。100 为完全不透明，30 为最透明。</div>
+                <div class="sg-slider-row">
+                    <input type="range" id="opacity-slider" min="30" max="100" value="{opacity}" oninput="document.getElementById('opacity-val').textContent=this.value">
+                    <span class="sg-slider-val" id="opacity-val">{opacity}</span>
+                </div>
+            </div>
+            <div class="sg-right">
+                <button class="sg-btn on" style="border:none;cursor:pointer;" onclick="saveOpacity();return false;">应用</button>
+            </div>
+        </div>
+{sg_toggle("毛玻璃效果", "为浮窗背景添加模糊效果，类似 Windows 亚克力材质。配合半透明效果更佳。", glass_on, "已启用", "已关闭", "toggle_float_blur")}
+    </div>
+
+    <div class="card">
+        <div class="card-title">统计与游戏</div>
+{sg_toggle("游戏内计数", "关闭后，在白名单游戏中的按键不会被计入统计。桌面应用照常计数。", game_count_on, "计数中", "已暂停", "toggle_game_counting")}
+{sg_toggle("鼠标统计", "开启后统计鼠标左键（LMB）、右键（RMB）和中键/滚轮按压（MMB）的点击次数，与键盘按键一同展示在热力图中。", mouse_track_on, "已启用", "已关闭", "toggle_mouse_tracking")}
+        <div class="sg-item">
+            <div class="sg-info">
+                <div class="sg-name">游戏白名单</div>
+                <div class="sg-desc">白名单中的进程会被识别为游戏，受上述两项设置的影响。通过 Ctrl+Shift+F8 热键也可快速添加/移除当前前台进程。</div>
+                <div class="wl-section" style="margin-top:8px;">
+                    <div class="wl-list">
 {wl_html}
 </div>
-            <form class="wl-add" action="/?page=settings" method="GET">
-                <input type="hidden" name="page" value="settings">
-                <input type="hidden" name="action" value="add_whitelist">
-                <input type="hidden" name="theme" value="{theme}">
-                <input type="text" name="process" placeholder="输入进程名，如 R6s.exe">
-                <button type="submit">添加</button>
-            </form>
-        </div>
-    </div>
-    <div class="card">
-        <div class="card-title">自动主题切换</div>
-        <div class="card-desc">设置白天和夜晚的切换时间。选择 <b>auto</b> 主题后，页面会在设定时间自动切换亮色/暗色主题。</div>
-        <form class="time-form" action="/?page=settings" method="GET">
-            <input type="hidden" name="page" value="settings">
-            <input type="hidden" name="action" value="save_theme_times">
-            <input type="hidden" name="theme" value="{theme}">
-            <div class="time-row">
-                <label>白天开始</label>
-                <input type="time" name="day_time" value="{day_time}">
-                <label>夜晚开始</label>
-                <input type="time" name="night_time" value="{night_time}">
-                <button type="submit">保存</button>
+                    <form class="wl-add" action="/?page=settings" method="GET" style="margin-top:6px;">
+                        <input type="hidden" name="page" value="settings">
+                        <input type="hidden" name="action" value="add_whitelist">
+                        <input type="hidden" name="theme" value="{theme}">
+                        <input type="text" name="process" placeholder="输入进程名，如 R6s.exe">
+                        <button type="submit">添加</button>
+                    </form>
+                </div>
             </div>
-        </form>
-    </div>
-    <div class="card">
-        <div class="card-title">浮窗透明度</div>
-        <div class="card-desc">控制右下角按键浮窗的透明度。100 为完全不透明，30 为最透明。</div>
-        <div class="slider-row">
-            <input type="range" id="opacity-slider" min="30" max="100" value="{opacity}" oninput="document.getElementById('opacity-val').textContent=this.value">
-            <span class="slider-val" id="opacity-val">{opacity}</span>
-            <button class="toggle-btn toggle-on" style="padding:6px 12px;border:none;cursor:pointer;font-size:13px;flex-shrink:0;" onclick="saveOpacity();return false;">应用</button>
         </div>
     </div>
-{toggle_row("毛玻璃效果", "为浮窗背景添加模糊效果，类似 Windows 亚克力材质。配合半透明效果更佳。", glass_on, "已启用", "已关闭", "toggle_float_blur")}
-{toggle_row("鼠标统计", "开启后统计鼠标左键（LMB）、右键（RMB）和中键/滚轮按压（MMB）的点击次数，与键盘按键一同展示在热力图中。", mouse_track_on, "已启用", "已关闭", "toggle_mouse_tracking")}
-{toggle_row("鼠标浮窗", "控制鼠标点击是否显示在右下角实时浮窗中。仅当「鼠标统计」开启时生效。", mouse_overlay_on, "已启用", "已关闭", "toggle_mouse_in_overlay")}
-{toggle_row("自动更新", "开启后打开仪表盘时会自动检测 GitHub 上的最新版本。关闭则不会自动检测。", auto_update_on, "已启用", "已关闭", "toggle_auto_update")}
+
     <div class="card">
-        <div class="card-title">版本更新</div>
-        <div class="card-desc">当前版本：<b style="color:#a855f7">v{CURRENT_VERSION}</b>。点击下方按钮手动检测是否有新版本可用。</div>
-        <div class="row" style="margin-top:12px;">
-            <a class="toggle-btn toggle-on" style="padding:8px 20px;border:none;cursor:pointer;font-size:13px;text-decoration:none;" onclick="checkUpdateNow();return false;">检查更新</a>
-            <span id="check-status" style="color:var(--text-dim);font-size:13px;margin-left:12px;"></span>
+        <div class="card-title">系统</div>
+        <div class="sg-item">
+            <div class="sg-info">
+                <div class="sg-name">自动主题切换</div>
+                <div class="sg-desc">设置白天和夜晚的切换时间。选择 <b>auto</b> 主题后，页面会在设定时间自动切换亮色/暗色主题。</div>
+                <form class="time-form" action="/?page=settings" method="GET" style="margin-top:6px;">
+                    <input type="hidden" name="page" value="settings">
+                    <input type="hidden" name="action" value="save_theme_times">
+                    <input type="hidden" name="theme" value="{theme}">
+                    <div class="time-row">
+                        <label>白天开始</label>
+                        <input type="time" name="day_time" value="{day_time}">
+                        <label>夜晚开始</label>
+                        <input type="time" name="night_time" value="{night_time}">
+                        <button type="submit">保存</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+{sg_toggle("自动更新", "开启后打开仪表盘时会自动检测 GitHub 上的最新版本。关闭则不会自动检测。", auto_update_on, "已启用", "已关闭", "toggle_auto_update")}
+        <div class="sg-item" style="border-bottom:none;">
+            <div class="sg-info">
+                <div class="sg-name">版本更新</div>
+                <div class="sg-desc">当前版本：<b style="color:#a855f7">v{CURRENT_VERSION}</b></div>
+            </div>
+            <div class="sg-right">
+                <a class="sg-btn on" style="text-decoration:none;cursor:pointer;" onclick="checkUpdateNow();return false;">检查更新</a>
+                <span id="check-status" style="font-size:12px;color:var(--text-dim);"></span>
+            </div>
         </div>
     </div>
+
 </div>
 <div class="footer">KeyHeatmap - 设置实时生效</div>
 <script>
@@ -1814,6 +2844,9 @@ class HeatmapHandler(BaseHTTPRequestHandler):
     stats: KeyStats = None
     settings: Settings = None
     overlay = None
+    # OIDC 登录状态（BaseHTTPRequestHandler 每请求新建实例，必须用类属性跨请求共享）
+    _oidc_verifier = None
+    _oidc_state = None
 
     def log_message(self, format, *args): pass
 
@@ -1822,6 +2855,7 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1838,14 +2872,15 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                     "current": CURRENT_VERSION,
                     "latest": CURRENT_VERSION,
                     "changelog": "",
+                    "announcement": None,
                 })
             else:
-                has, latest, changelog = result
                 self._json_response({
-                    "has_update": has,
+                    "has_update": result["has_update"],
                     "current": CURRENT_VERSION,
-                    "latest": latest,
-                    "changelog": changelog,
+                    "latest": result["latest"],
+                    "changelog": result["changelog"],
+                    "announcement": result.get("announcement"),
                 })
             return True
 
@@ -1857,12 +2892,12 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             return True
 
         if path == "/api/update/apply":
-            downloaded = download_update()
-            if downloaded:
-                apply_update(downloaded)
-                self._json_response({"status": "applying"})
-            else:
-                self._json_response({"error": "下载失败"}, 500)
+            self._json_response({"status": "downloading"})
+            def _bg_download_and_apply():
+                downloaded = download_update()
+                if downloaded:
+                    apply_update(downloaded)
+            threading.Thread(target=_bg_download_and_apply, daemon=True).start()
             return True
 
         if path == "/api/settings":
@@ -1871,6 +2906,7 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             self._json_response({
                 "auto_update": auto,
                 "update_skip_until": skip,
+                "last_announcement_id": self.settings.get("last_announcement_id"),
                 "version": CURRENT_VERSION,
                 "combo_float_enabled": self.settings.get("combo_float_enabled", True),
                 "game_counting_enabled": self.settings.get("game_counting_enabled", True),
@@ -1900,6 +2936,61 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             self._json_response({"ranking": ranking})
             return True
 
+        if path == "/api/user":
+            params = self._parse_query()
+            device_id = params.get("device_id", [""])[0]
+            if device_id in ("", "default"):
+                device_id = self.settings.get("cloud_user_id", "") or device_id
+            ok, result = api_get_user(device_id)
+            if ok:
+                result["device_id"] = device_id
+                self._json_response(result)
+            else:
+                # 后端无此接口时，以本地 settings 为准
+                nickname = self.settings.get("cloud_nickname", "")
+                self._json_response({
+                    "registered": bool(nickname),
+                    "nickname": nickname or None,
+                    "device_id": device_id,
+                })
+            return True
+
+        if path == "/api/leaderboard/cloud":
+            params = self._parse_query()
+            target_date = params.get("target_date", [None])[0]
+            limit = int(params.get("limit", ["30"])[0])
+            include_mouse = params.get("include_mouse", ["true"])[0] != "false"
+            ok, result = api_get_leaderboard(target_date, limit, include_mouse)
+            if ok:
+                self._json_response(result)
+            else:
+                self._json_response({"error": str(result), "leaderboard": None})
+            return True
+
+        if path == "/api/keyheat/cloud":
+            params = self._parse_query()
+            target_date = params.get("target_date", [None])[0]
+            limit = int(params.get("limit", ["50"])[0])
+            include_mouse = params.get("include_mouse", ["true"])[0] != "false"
+            ok, result = api_get_keyheat(target_date, limit, include_mouse)
+            if ok:
+                self._json_response(result)
+            else:
+                self._json_response({"error": str(result), "ranking": None})
+            return True
+
+        if path == "/api/toggle_mouse_tracking":
+            current = self.settings.get("mouse_tracking_enabled", False)
+            self.settings.set("mouse_tracking_enabled", not current)
+            self._json_response({"mouse_tracking_enabled": not current})
+            return True
+
+        if path == "/api/toggle_leaderboard_mouse":
+            current = self.settings.get("leaderboard_include_mouse", True)
+            self.settings.set("leaderboard_include_mouse", not current)
+            self._json_response({"leaderboard_include_mouse": not current})
+            return True
+
         return False
 
     def _handle_api_post(self, path):
@@ -1909,6 +3000,15 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             data = json.loads(body)
         except:
             data = {}
+
+        if path == "/api/announcement/read":
+            aid = data.get("id")
+            if aid:
+                with self.settings._lock:
+                    self.settings._data["last_announcement_id"] = aid
+                    self.settings._save()
+            self._json_response({"ok": True})
+            return True
 
         if path == "/api/settings":
             if "auto_update" in data:
@@ -1923,7 +3023,198 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": True})
             return True
 
+        if path == "/api/user/register":
+            device_id = data.get("device_id", "").strip()
+            nickname = data.get("nickname", "").strip()
+            if not device_id:
+                device_id = getattr(self, "_device_id", "")
+            if not device_id or not nickname:
+                self._json_response({"error": "device_id and nickname required"}, 400)
+                return True
+            ok, result = api_register_user(device_id, nickname)
+            if ok:
+                self.settings.set("cloud_nickname", nickname)
+                self._json_response(result)
+            else:
+                self._json_response({"error": result}, 500)
+            return True
+
+        if path == "/api/sync-now":
+            # 触发云端数据同步上传（需已参加排行）
+            nickname = self.settings.get("cloud_nickname", "")
+            if not nickname:
+                self._json_response({"ok": False, "error": "请先参加排行"}, 403)
+                return True
+            server = getattr(HeatmapHandler, "server_ref", None)
+            if server is None:
+                self._json_response({"ok": False, "error": "服务未就绪"}, 503)
+                return True
+            # 同步执行（非线程，确保客户端能拿到结果）
+            try:
+                server._do_cloud_sync()
+                self._json_response({"ok": True, "message": "同步完成"})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)}, 500)
+            return True
+
+        if path == "/api/upload/sync":
+            items = data.get("items", [])
+            if not items:
+                self._json_response({"error": "items required"}, 400)
+                return True
+            ok, result = api_upload_stats(items)
+            if ok:
+                self._json_response(result)
+            else:
+                self._json_response({"error": result}, 500)
+            return True
+
         return False
+
+    # ─── Authing OIDC 登录 ───
+
+    def start_oidc_login(self):
+        """生成 PKCE verifier/state，构造授权 URL 并打开浏览器，返回授权 URL"""
+        verifier = generate_code_verifier()
+        challenge = generate_code_challenge(verifier)
+        state = secrets.token_urlsafe(16)
+        HeatmapHandler._oidc_verifier = verifier
+        HeatmapHandler._oidc_state = state
+        query = urlencode({
+            "client_id": AUTHING_APP_ID,
+            "redirect_uri": AUTHING_REDIRECT_URI,
+            "response_type": "code",
+            "scope": "openid profile",
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": "login",
+        })
+        auth_url = f"{AUTHING_AUTH_URL}?{query}"
+        try:
+            webbrowser.open(auth_url)
+            log("OIDC login: browser opened")
+        except Exception as e:
+            log(f"OIDC webbrowser.open failed: {e}")
+        return auth_url
+
+    def handle_oidc_callback(self, code, state):
+        """校验 state，用 code+code_verifier 换 id_token，解析 JWT 后以 sub 注册用户"""
+        if not code:
+            return False, "缺少 code 参数"
+        if state != getattr(self, "_oidc_state", None):
+            return False, "state 校验失败"
+        verifier = getattr(self, "_oidc_verifier", "")
+        try:
+            token_body = urlencode({
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": AUTHING_REDIRECT_URI,
+                "client_id": AUTHING_APP_ID,
+                "client_secret": AUTHING_APP_SECRET,
+                "code_verifier": verifier,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                AUTHING_TOKEN_URL,
+                data=token_body,
+                headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "KeyHeatmap"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                token_json = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            log(f"OIDC token exchange failed: {e}")
+            return False, f"换取 token 失败: {e}"
+        id_token = token_json.get("id_token", "")
+        if not id_token:
+            return False, "响应中缺少 id_token"
+        payload = _decode_jwt_payload(id_token)
+        sub = payload.get("sub", "")
+        nickname = (payload.get("nickname") or payload.get("name")
+                    or payload.get("preferred_username") or sub)
+        if not sub:
+            return False, "JWT payload 缺少 sub"
+        # 优先查询数据库：该 sub 是否已注册（换了电脑也能找回改过的昵称）
+        db_ok, db_user = api_get_user(sub)
+        if db_ok and db_user.get("registered") and db_user.get("nickname"):
+            nickname = db_user["nickname"]
+            log(f"OIDC login: using existing nickname={nickname} from db")
+        # 截断超长昵称（后端限制 10 字符，与前端一致）
+        if len(nickname) > 10:
+            nickname = nickname[:10]
+        # 注册/更新：若昵称与他人重复（409），自动追加随机后缀重试，最多 3 次
+        import random
+        ok, result = api_register_user(sub, nickname)
+        if not ok:
+            base = nickname[:8] if len(nickname) > 8 else nickname
+            for _ in range(3):
+                candidate = f"{base}{random.randint(10, 99)}"
+                ok, result = api_register_user(sub, candidate)
+                if ok:
+                    nickname = candidate
+                    break
+        if not ok:
+            return False, f"注册用户失败: {result}"
+        self.settings.set("cloud_nickname", nickname)
+        self.settings.set("cloud_user_id", sub)
+        log(f"OIDC login success: sub={sub} nickname={nickname}")
+        # 登录成功后立即触发一次数据同步上传（后台线程，避免阻塞回调响应），
+        # 让新登录用户马上有排行数据；后台定时循环每 5 分钟也会继续兜底
+        server = getattr(HeatmapHandler, "server_ref", None)
+        if server is not None:
+            threading.Thread(target=server._do_cloud_sync, daemon=True,
+                             name="cloud-sync-on-login").start()
+        return True, {"sub": sub, "nickname": nickname}
+
+    def _serve_auth_callback_html(self, ok, result):
+        """返回登录结果页：显示状态，2 秒后刷新父窗口并关闭自己"""
+        if ok:
+            title = "登录成功"
+            msg = f"已成功登录并加入排行榜（昵称：{result.get('nickname', '')}）"
+        else:
+            title = "登录失败"
+            msg = f"登录失败：{result}"
+        html = f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>{title} | KeyHeatmap</title>
+<style>
+body {{ font-family:'Segoe UI',system-ui,sans-serif; background:#0d0d0d; color:#e0e0e0;
+       display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }}
+.card {{ text-align:center; padding:40px 48px; background:#111; border-radius:16px;
+         border:1px solid rgba(124,58,237,0.3); }}
+h2 {{ margin:0 0 12px; }}
+.msg {{ color:#888; font-size:14px; margin-bottom:16px; }}
+.tip {{ color:#666; font-size:12px; }}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>{title}</h2>
+<div class="msg">{msg}</div>
+<div class="tip">窗口将在 2 秒后自动关闭...</div>
+</div>
+<script>
+setTimeout(function() {{
+    try {{
+        if (window.opener && !window.opener.closed) {{
+            window.opener.location.reload();
+            window.close();
+            return;
+        }}
+    }} catch(e) {{}}
+    // 非脚本打开的窗口无法 close，直接跳回云端排行页
+    window.location.href = 'http://127.0.0.1:18888/?page=cloud&_ts=' + Date.now();
+}}, 2000);
+</script>
+</body>
+</html>"""
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_settings_action(self, params):
         """处理设置页面的 GET 请求和操作"""
@@ -1956,6 +3247,12 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             self._redirect_to_settings(theme)
             return True
 
+        if action == "toggle_leaderboard_mouse":
+            current = self.settings.get("leaderboard_include_mouse", True)
+            self.settings.set("leaderboard_include_mouse", not current)
+            self._redirect_to_settings(theme)
+            return True
+
         if action == "toggle_mouse_in_overlay":
             current = self.settings.get("mouse_in_overlay", False)
             self.settings.set("mouse_in_overlay", not current)
@@ -1965,6 +3262,20 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         if action == "toggle_auto_update":
             current = self.settings.get("auto_update", True)
             self.settings.set("auto_update", not current)
+            self._redirect_to_settings(theme)
+            return True
+
+        if action == "toggle_autostart":
+            tray = getattr(HeatmapHandler, "tray", None)
+            if tray and hasattr(tray, "_toggle_autostart"):
+                tray._toggle_autostart()
+            self._redirect_to_settings(theme)
+            return True
+
+        if action == "toggle_desktop_shortcut":
+            tray = getattr(HeatmapHandler, "tray", None)
+            if tray and hasattr(tray, "_toggle_desktop_shortcut"):
+                tray._toggle_desktop_shortcut()
             self._redirect_to_settings(theme)
             return True
 
@@ -2020,6 +3331,28 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         html = build_settings_html(self.settings, theme)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
+
+    def _serve_cloud_page(self, theme):
+        resolved_theme = theme
+        if theme == "auto":
+            resolved_theme = HeatmapHandler.overlay._read_theme() if HeatmapHandler.overlay else "dark"
+        params = self._parse_query()
+        if '_ts' not in params:
+            ts = str(int(time.time() * 1000))
+            self.send_response(302)
+            self.send_header("Location", f"/?page=cloud&theme={resolved_theme}&_ts={ts}")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            return
+        html = build_cloud_page_html(self.settings, resolved_theme, url_theme=theme)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Expires", "0")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(html.encode("utf-8"))
 
@@ -2031,18 +3364,22 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         ranking = self.stats.get_ranking(period)
         hourly = self.stats.get_hourly_data()
         trend = self.stats.get_trend_data()
-        # 鼠标数据
-        mouse_data = {}
-        mouse_track = self.settings.get("mouse_tracking_enabled", False)
-        if mouse_track:
-            all_data = self.stats.get_data(period)
-            mouse_data = {k: all_data.get(k, 0) for k in MOUSE_KEYS}
+        # 鼠标数据（热力图始终显示；总按键/最忙键/排行根据"包含鼠标点击"开关过滤）
+        include_mouse = self.settings.get("leaderboard_include_mouse", True)
+        all_data = self.stats.get_data(period)
+        mouse_data = {k: all_data.get(k, 0) for k in MOUSE_KEYS}
+        if not include_mouse:
+            ranking = [(k, v) for k, v in ranking if k not in MOUSE_KEYS]
 
+        resolved_theme = theme
+        if theme == "auto":
+            resolved_theme = HeatmapHandler.overlay._read_theme() if HeatmapHandler.overlay else "dark"
         html = build_dashboard_html(data, labels.get(period, period), max_count,
-                                     theme, badge, ranking, hourly, trend,
-                                     mouse_data, self.settings)
+                                     resolved_theme, badge, ranking, hourly, trend,
+                                     mouse_data, self.settings, url_theme=theme)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(html.encode("utf-8"))
 
@@ -2050,6 +3387,19 @@ class HeatmapHandler(BaseHTTPRequestHandler):
         try:
             path = self.path.split("?")[0]
             params = self._parse_query()
+
+            # Authing OIDC 路由（需在 /api/ 拦截之前）
+            if path == "/api/auth/login":
+                auth_url = self.start_oidc_login()
+                self._json_response({"redirect": auth_url})
+                return
+
+            if path == "/auth/callback":
+                code = params.get("code", [""])[0]
+                state = params.get("state", [""])[0]
+                ok, result = self.handle_oidc_callback(code, state)
+                self._serve_auth_callback_html(ok, result)
+                return
 
             # API routes
             if path.startswith("/api/"):
@@ -2062,12 +3412,16 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                 if self._handle_settings_action(params):
                     return
 
-            theme = params.get("theme", ["dark"])[0]
+            theme = params.get("theme", ["auto"])[0]
             if theme not in ("light", "dark", "auto"):
-                theme = "dark"
+                theme = "auto"
 
             if page == "settings":
                 self._serve_settings_page(theme)
+                return
+
+            if page == "cloud":
+                self._serve_cloud_page(theme)
                 return
 
             period = params.get("period", ["today"])[0]
@@ -2101,6 +3455,34 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                 pass
 
 
+    def do_DELETE(self):
+        try:
+            path = self.path.split("?")[0]
+            params = self._parse_query()
+            if path == "/api/user":
+                device_id = params.get("device_id", [""])[0]
+                if device_id in ("", "default"):
+                    device_id = self.settings.get("cloud_user_id", "") or device_id
+                # 退出排行：只清本地状态和上传过的 key_stats，不删 users 记录
+                # 这样改过的昵称不会丢，换设备重登也能恢复
+                ok, result = api_delete_user(device_id)
+                self.settings.set("cloud_nickname", "")
+                self.settings.set("cloud_user_id", "")
+                if ok:
+                    self._json_response(result)
+                else:
+                    # 后端可能已无此用户，本地清掉就算成功
+                    self._json_response({"deleted": True})
+                return
+            self._json_response({"error": "not found"}, 404)
+        except Exception as e:
+            log(f"HTTP DELETE error: {e}")
+            try:
+                self._json_response({"error": str(e)}, 500)
+            except:
+                pass
+
+
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
@@ -2112,6 +3494,10 @@ class HeatmapServer:
         self.overlay = overlay
         self.port = self._find_port()
         self.server = None
+        self._device_id = _get_device_id()
+        self._sync_stop = threading.Event()
+        self._sync_lock = threading.Lock()
+        self._last_sync_date = None
 
     def _find_port(self):
         for port in range(18888, 19000):
@@ -2124,21 +3510,159 @@ class HeatmapServer:
                 continue
         return 18888
 
+    def _backend_running(self):
+        """检查 8000 端口是否已有后端服务在监听"""
+        try:
+            s = socket.create_connection(("127.0.0.1", 8000), timeout=1)
+            s.close()
+            return True
+        except OSError:
+            return False
+
+    def _start_backend(self):
+        """启动 FastAPI 后端（8000）。
+        远程模式（CLOUD_API_URL 非空）：跳过本地后端，API 请求直接走远程服务器。
+        frozen(exe) 模式：后端随 exe 内嵌线程运行，不依赖外部 python；
+        源码模式：保持原有 pythonw wrapper.py 子进程方式。
+        """
+        if CLOUD_API_URL:
+            log(f"Cloud mode: backend routed to {CLOUD_API_URL}, skip local 8000")
+            return
+        if self._backend_running():
+            log("Backend already running on 8000, skip start")
+            return
+        if getattr(sys, "frozen", False):
+            try:
+                import backend.main as backend_main
+                import uvicorn
+                config = uvicorn.Config(
+                    backend_main.app,
+                    host="127.0.0.1",
+                    port=8000,
+                    log_config=None,
+                    http="h11",
+                )
+                server = uvicorn.Server(config)
+                t = threading.Thread(target=server.run, daemon=True, name="backend-inproc")
+                t.start()
+                log("Backend started in-process (frozen)")
+            except Exception as e:
+                log(f"Backend in-process start failed: {e}")
+        else:
+            try:
+                pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+                wrapper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend", "wrapper.py")
+                self._backend_proc = subprocess.Popen(
+                    [pythonw, wrapper],
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                log(f"Backend process started (PID {self._backend_proc.pid})")
+            except Exception as e:
+                log(f"Backend process start failed: {e}")
+
     def start(self):
         HeatmapHandler.stats = self.stats
         HeatmapHandler.settings = self.settings
         HeatmapHandler.overlay = self.overlay
+        HeatmapHandler._device_id = self._device_id
+        HeatmapHandler.server_ref = self
         self.server = ThreadingHTTPServer(("127.0.0.1", self.port), HeatmapHandler)
         t = threading.Thread(target=self.server.serve_forever, daemon=True)
         t.start()
         log(f"HTTP server on port {self.port}")
+        # 启动后台云同步
+        self._sync_stop.clear()
+        sync_t = threading.Thread(target=self._cloud_sync_loop, daemon=True, name="cloud-sync")
+        sync_t.start()
+        # 启动后端（8000）
+        self._start_backend()
+
+    def _cloud_sync_loop(self):
+        """后台定时同步：启动立即执行一次，之后每 30 分钟上传各登录用户当天数据"""
+        # 首次延迟 5 秒（等 HTTP server 和 stats 就绪），然后立即同步
+        self._sync_stop.wait(5)
+        try:
+            self._do_cloud_sync()
+        except Exception as e:
+            log(f"cloud sync error (initial): {e}")
+        # 后续每 30 分钟
+        while not self._sync_stop.wait(1800):
+            try:
+                self._do_cloud_sync()
+            except Exception as e:
+                log(f"cloud sync error: {e}")
+
+    def _do_cloud_sync(self):
+        # 用户未点击"参加排行"，不注册不上传
+        nickname = self.settings.get("cloud_nickname", "")
+        if not nickname:
+            return
+        # 与后台定时循环互斥，避免登录触发与定时触发并发重复上传
+        with self._sync_lock:
+            self._do_cloud_sync_locked()
+
+    def _do_cloud_sync_locked(self):
+        # 登录后统一使用 Authing sub 作为 user_id（未登录时回退设备 ID）
+        user_id = self.settings.get("cloud_user_id", "") or self._device_id
+        # 确保用户已注册（昵称变更时更新）
+        nickname = self.settings.get("cloud_nickname", "")
+        if not nickname:
+            return
+        api_register_user(user_id, nickname)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 只上传当天数据（覆盖式），不再传昨天，节省云空间
+        dates_to_sync = []
+        with self.stats.lock:
+            daily = self.stats.stats.get("daily", {})
+        if today in daily and daily[today]:
+            dates_to_sync.append(today)
+        if not dates_to_sync:
+            return
+        all_items = []
+        for date_str in dates_to_sync:
+            for key_name, count in daily[date_str].items():
+                all_items.append({
+                    "user_id": user_id,
+                    "stat_date": date_str,
+                    "key_name": key_name,
+                    "count": count,
+                })
+        ok, result = api_upload_stats(all_items)
+        if ok:
+            with self.stats.lock:
+                if "cloud_synced" not in self.stats.stats:
+                    self.stats.stats["cloud_synced"] = []
+                for date_str in dates_to_sync:
+                    if date_str not in self.stats.stats["cloud_synced"]:
+                        self.stats.stats["cloud_synced"].append(date_str)
+                self.stats._save()
+            log(f"cloud sync OK: {dates_to_sync}, {len(all_items)} keys")
+        else:
+            log(f"cloud sync failed: {result}")
 
     def open_browser(self, period="today"):
         webbrowser.open(f"http://127.0.0.1:{self.port}/?period={period}")
 
     def stop(self):
+        self._sync_stop.set()
+        if self._backend_proc:
+            self._backend_proc.terminate()
+            try:
+                self._backend_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._backend_proc.kill()
+                self._backend_proc.wait()
+            log(f"Backend process stopped (PID {self._backend_proc.pid})")
+            self._backend_proc = None
         if self.server:
-            self.server.shutdown()
+            try:
+                self.server.shutdown()
+                self.server.server_close()
+            except Exception as e:
+                log(f"server shutdown error: {e}")
+            finally:
+                self.server = None
 
 
 # ─── 虚拟键码 → 显示名映射（用于轮询模式） ───
@@ -2689,7 +4213,8 @@ class TrayApp:
 
     def _create_autostart(self):
         cmd = self._get_autostart_cmd()
-        subprocess.run(['schtasks', '/create', '/tn', 'KeyHeatmap', '/tr', cmd, '/sc', 'onlogon', '/f', '/rl', 'limited'], capture_output=True, text=True)
+        # onlogon + 15 秒延迟（mmmm:ss 格式），等桌面/explorer 就绪后再启动，避免托盘被会话隔离拒绝访问
+        subprocess.run(['schtasks', '/create', '/tn', 'KeyHeatmap', '/tr', cmd, '/sc', 'onlogon', '/delay', '0000:15', '/f', '/rl', 'limited'], capture_output=True, text=True)
         try:
             import winreg
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\KeyHeatmap")
@@ -2716,14 +4241,51 @@ class TrayApp:
             self._create_autostart()
             self.autostart_enabled = True
 
+    def _check_desktop_shortcut(self):
+        return os.path.exists(os.path.join(os.environ["USERPROFILE"], "Desktop", "KeyHeatmap.lnk"))
+
+    def _toggle_desktop_shortcut(self):
+        desktop = os.path.join(os.environ["USERPROFILE"], "Desktop")
+        lnk_path = os.path.join(desktop, "KeyHeatmap.lnk")
+        if getattr(sys, 'frozen', False):
+            exe = sys.executable
+        else:
+            exe = os.path.abspath(sys.argv[0])
+        if os.path.exists(lnk_path):
+            os.remove(lnk_path)
+            return False
+        else:
+            ps = f'''$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut("{lnk_path}"); $s.TargetPath = "{exe}"; $s.WorkingDirectory = "{os.path.dirname(exe)}"; $s.IconLocation = "{exe},0"; $s.Save()'''
+            subprocess.run(['powershell', '-Command', ps], capture_output=True)
+            return True
+
     def _on_quit(self, icon, item):
-        self.stats.save_and_snapshot()
-        self.listener.stop()
-        self.server.stop()
-        if self.overlay:
-            self.overlay.stop()
-        icon.stop()
-        os._exit(0)
+        # 清理过程逐项隔离异常，确保 os._exit(0) 无条件执行
+        try:
+            try:
+                self.stats.save_and_snapshot()
+            except Exception as e:
+                log(f"quit: save_and_snapshot error: {e}")
+            try:
+                self.listener.stop()
+            except Exception as e:
+                log(f"quit: listener.stop error: {e}")
+            try:
+                self.server.stop()
+            except Exception as e:
+                log(f"quit: server.stop error: {e}")
+            if self.overlay:
+                try:
+                    self.overlay.stop()
+                except Exception as e:
+                    log(f"quit: overlay.stop error: {e}")
+        finally:
+            try:
+                icon.stop()
+            except Exception as e:
+                log(f"quit: icon.stop error: {e}")
+            # 兜底：立即终止当前进程，防止任何线程/资源残留导致无法退出
+            os._exit(0)
 
     def _on_show(self, icon, item):
         self.server.open_browser("today")
@@ -2761,18 +4323,33 @@ class TrayApp:
         )
         self.icon = Icon("KeyHeatmap", tray_icon, "键盘热力图", menu)
 
-        # ─── 托盘：无交互桌面时静默跳过，不影响其他功能 ───
-        try:
-            self.icon.run()
-        except OSError as e:
-            log(f"tray icon unavailable (non-interactive desktop): {e}")
-            # 托盘不可用但程序继续运行：仪表盘 localhost:18888、浮窗、按键记录均正常
-            # 保持进程不退出，等待 Ctrl+C 或任务管理器关闭
+        # ─── 托盘：启动失败时重试附着交互桌面，避免自启时桌面未就绪导致图标缺失 ───
+        max_retry = 30          # 最多重试 30 次
+        retry_interval = 5      # 每次间隔 5 秒（共约 2.5 分钟）
+        for attempt in range(1, max_retry + 1):
             try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                pass
+                self.icon.run()
+                return
+            except OSError as e:
+                log(f"tray icon attempt {attempt}/{max_retry} failed (non-interactive desktop): {e}")
+                # 重新附着当前交互桌面，等 explorer 就绪
+                try:
+                    hDesktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
+                    if hDesktop:
+                        ctypes.windll.user32.SetThreadDesktop(hDesktop)
+                        ctypes.windll.user32.CloseDesktop(hDesktop)
+                except Exception as de:
+                    log(f"reattach desktop error: {de}")
+                # 重建图标对象再试
+                self.icon = Icon("KeyHeatmap", create_tray_icon(), "键盘热力图", menu)
+                time.sleep(retry_interval)
+        # 重试全部失败：托盘不可用但程序继续运行（仪表盘/浮窗/按键记录均正常）
+        log("tray icon unavailable after retries, running headless")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
 
 
 # ─── 主入口 ────────────────────────────────────
@@ -2811,6 +4388,12 @@ def main():
 
     log("all components started, entering tray loop")
     tray = TrayApp(stats, listener, server, overlay)
+    HeatmapHandler.tray = tray
+    # ─── 首次启动自动创建桌面快捷方式 ───
+    if not settings.get("shortcut_auto_created", False):
+        if not tray._check_desktop_shortcut():
+            tray._toggle_desktop_shortcut()
+        settings.set("shortcut_auto_created", True)
     try:
         tray._ensure_autostart()
     except Exception as e:

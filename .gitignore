@@ -1,0 +1,28 @@
+# 环境变量（含数据库密码）
+.env
+
+# 编译产物
+dist/
+build/
+build_new/
+dist_new/
+dist_bak_*/
+__pycache__/
+*.pyc
+
+# exe 备份
+*.exe
+*.exe.bak*
+
+# 日志
+*.log
+*.log.err
+*.log.out
+
+# spec 备份
+*.spec.bak*
+
+# 临时文件
+Old/
+*_extracted/
+build_kh.bat
