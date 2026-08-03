@@ -1,1 +1,13 @@
-﻿{"version":"4.0.0 Public Beta","url":"https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe","notes":"KeyHeatmap v4.0.0 Public Beta"}
+{
+  "version": "4.0.0 Public Beta",
+  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe",
+  "notes": "KeyHeatmap v4.0.0 Public Beta\n- 新增云端排行榜、云端数据同步\n- 新增远程后端模式",
+  "announcement": {
+    "id": "v4.0.0-pb",
+    "title": "KeyHeatmap v4.0.0 Public Beta 已发布",
+    "level": "important",
+    "body": "本次更新：\n- 新增云端排行榜（参加排行/昵称/总按键排行/按键热度分析）\n- 云端数据每30分钟自动同步，支持手动同步\n- 远程后端模式，客户端不再内置数据库凭据\n- 排行榜加载提示（海外服务首次加载约10秒）",
+    "date": "2026-08-03"
+  },
+  "announcement_history": []
+}
