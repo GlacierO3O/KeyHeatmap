@@ -1,6 +1,6 @@
 {
   "version": "4.0.0 Public Beta",
-  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe",
+  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.0-public-beta/KeyHeatmap.exe",
   "notes": "KeyHeatmap v4.0.0 Public Beta\n- 新增云端排行榜、云端数据同步\n- 新增远程后端模式",
   "announcement": {
     "id": "v4.0.0-pb",

@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlparse, urlencode
 CURRENT_VERSION = "4.0.0 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
-RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe"
+RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.0-public-beta/KeyHeatmap.exe"
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
@@ -2910,6 +2910,7 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                     "latest": CURRENT_VERSION,
                     "changelog": "",
                     "announcement": None,
+                    "announcement_history": [],
                 })
             else:
                 self._json_response({
@@ -2918,6 +2919,7 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                     "latest": result["latest"],
                     "changelog": result["changelog"],
                     "announcement": result.get("announcement"),
+                    "announcement_history": result.get("announcement_history", []),
                 })
             return True
 
