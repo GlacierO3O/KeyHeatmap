@@ -3,6 +3,8 @@ KeyHeatmap FastAPI 后端
 GaiaDB (MySQL 8.0) — 按键统计 & 排行榜服务
 """
 
+import threading
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -61,6 +63,31 @@ def _cleanup_hidden_users():
 
 def get_conn():
     return pymysql.connect(**DB_CONFIG, connect_timeout=5)
+
+
+# ---------- 排行榜响应缓存（TTL 30 秒，避免高频请求直查 DB） ----------
+_CACHE_LOCK = threading.Lock()
+_LEADERBOARD_CACHE = {"key": None, "ts": 0.0, "data": None}
+_KEYHEAT_CACHE = {"key": None, "ts": 0.0, "data": None}
+_CACHE_TTL = 30.0
+
+
+def _cache_key(target_date, include_mouse, limit):
+    return (str(target_date), include_mouse, limit)
+
+
+def _get_cached(cache, key):
+    with _CACHE_LOCK:
+        if cache["key"] == key and time.time() - cache["ts"] < _CACHE_TTL:
+            return cache["data"]
+    return None
+
+
+def _set_cached(cache, key, data):
+    with _CACHE_LOCK:
+        cache["key"] = key
+        cache["ts"] = time.time()
+        cache["data"] = data
 
 
 # ---------- Models ----------
@@ -170,6 +197,12 @@ def leaderboard(
     include_mouse: bool = True,
     limit: int = 30,
 ):
+    # 30 秒响应缓存：命中时直接返回，不查 DB
+    ck = _cache_key(f"{target_date}|{key_name}", include_mouse, limit)
+    cached = _get_cached(_LEADERBOARD_CACHE, ck)
+    if cached is not None:
+        return cached
+
     conn = get_conn()
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
@@ -211,11 +244,6 @@ def leaderboard(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-            cur.execute(
-                "SELECT DISTINCT stat_date FROM key_stats ORDER BY stat_date DESC"
-            )
-            date_rows = cur.fetchall()
-
         leaderboard = [
             LeaderboardEntry(
                 rank=i + 1,
@@ -226,9 +254,10 @@ def leaderboard(
             )
             for i, r in enumerate(rows)
         ]
-        dates = [str(d["stat_date"]) for d in date_rows]
-
-        return {"leaderboard": leaderboard, "dates": dates}
+        # 前端已不使用 dates，省略额外查询以提速
+        result = {"leaderboard": leaderboard, "dates": []}
+        _set_cached(_LEADERBOARD_CACHE, ck, result)
+        return result
     finally:
         conn.close()
 
@@ -247,6 +276,12 @@ def keyheat(
     limit: int = 50,
 ):
     """按键热度分析：按 key_name 聚合所有用户的按键总次数排行"""
+    # 30 秒响应缓存
+    ck = _cache_key(target_date, include_mouse, limit)
+    cached = _get_cached(_KEYHEAT_CACHE, ck)
+    if cached is not None:
+        return cached
+
     conn = get_conn()
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
@@ -291,7 +326,9 @@ def keyheat(
             for i, r in enumerate(rows)
         ]
 
-        return {"ranking": ranking}
+        result = {"ranking": ranking}
+        _set_cached(_KEYHEAT_CACHE, ck, result)
+        return result
     finally:
         conn.close()
 

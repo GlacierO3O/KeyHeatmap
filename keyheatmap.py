@@ -2451,6 +2451,16 @@ function syncNow() {{
 var _cloudLoaded = false;
 var _cloudTab = 'total';   // total=总按键排行, heat=按键热度分析
 var _includeMouse = true;  // 总按键排行是否包含鼠标三键（默认包含）
+// 30 秒 TTL 缓存：避免切换标签/开关时反复请求云端
+var _cloudCache = { lb: null, lbKey: null, lbTs: 0, heat: null, heatKey: null, heatTs: 0 };
+var _CACHE_TTL = 30000;
+
+function _cacheGet(cache, key) {{
+    return (cache.key === key && Date.now() - cache.ts < _CACHE_TTL) ? cache.data : null;
+}}
+function _cachePut(cache, key, data) {{
+    cache.key = key; cache.ts = Date.now(); cache.data = data;
+}}
 
 function switchCloudTab(tab) {{
     _cloudTab = tab;
@@ -2491,45 +2501,58 @@ function loadCloudLeaderboard() {{
     var _d = new Date();
     var _td = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
     var url = '/api/leaderboard/cloud?limit=30&include_mouse=' + (_includeMouse ? 'true' : 'false') + '&target_date=' + encodeURIComponent(_td);
+    var ck = _td + '|' + (_includeMouse ? '1' : '0');
+    var cached = _cacheGet(_cloudCache.lb, ck);
+    if (cached) {{
+        _renderLeaderboard(cached);
+        return;
+    }}
     fetch(url)
         .then(function(r) {{ return r.json(); }})
         .then(function(data) {{
-            try {{
-                if (loading) loading.style.display = 'none';
-                _cloudLoaded = true;
-                if (data.error && data.leaderboard === null) {{
-                    if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
-                    return;
-                }}
-                var lb = data.leaderboard || [];
-                if (lb.length === 0) {{
-                    if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无云端数据</div>';
-                    return;
-                }}
-                var maxCount = lb[0].total_count || 1;
-                var html = '';
-                lb.forEach(function(row, idx) {{
-                    var pct = Math.round((row.total_count || 0) / maxCount * 100);
-                    var rankCls = '';
-                    if (idx === 0) rankCls = ' top1';
-                    else if (idx === 1) rankCls = ' top2';
-                    else if (idx === 2) rankCls = ' top3';
-                    html += '<div class="rank-row">' +
-                        '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
-                        '<span class="rank-key">' + (row.nickname || row.user_id || '???') + '</span>' +
-                        '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
-                        '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
-                }});
-                if (list) list.innerHTML = html;
-            }} catch(e) {{
-                if (loading) loading.style.display = 'none';
-                if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">数据解析失败: ' + (e.message || '未知') + '</div>';
-            }}
+            _cachePut(_cloudCache.lb, ck, data);
+            _renderLeaderboard(data);
         }})
         .catch(function() {{
             if (loading) loading.style.display = 'none';
             if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">网络请求失败，请确认 KeyHeatmap 后端服务已启动</div>';
         }});
+}}
+
+function _renderLeaderboard(data) {{
+    var loading = document.getElementById('cloudLoading');
+    var list = document.getElementById('cloudRankingList');
+    try {{
+        if (loading) loading.style.display = 'none';
+        _cloudLoaded = true;
+        if (data.error && data.leaderboard === null) {{
+            if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
+            return;
+        }}
+        var lb = data.leaderboard || [];
+        if (lb.length === 0) {{
+            if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无云端数据</div>';
+            return;
+        }}
+        var maxCount = lb[0].total_count || 1;
+        var html = '';
+        lb.forEach(function(row, idx) {{
+            var pct = Math.round((row.total_count || 0) / maxCount * 100);
+            var rankCls = '';
+            if (idx === 0) rankCls = ' top1';
+            else if (idx === 1) rankCls = ' top2';
+            else if (idx === 2) rankCls = ' top3';
+            html += '<div class="rank-row">' +
+                '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
+                '<span class="rank-key">' + (row.nickname || row.user_id || '???') + '</span>' +
+                '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
+                '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
+        }});
+        if (list) list.innerHTML = html;
+    }} catch(e) {{
+        if (loading) loading.style.display = 'none';
+        if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">数据解析失败: ' + (e.message || '未知') + '</div>';
+    }}
 }}
 
 // ─── 按键热度分析排行（所有用户每个按键的总次数） ───
@@ -2542,44 +2565,57 @@ function loadKeyHeat() {{
     var _d = new Date();
     var _td = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
     var url = '/api/keyheat/cloud?limit=50&include_mouse=' + (_includeMouse ? 'true' : 'false') + '&target_date=' + encodeURIComponent(_td);
+    var ck = _td + '|' + (_includeMouse ? '1' : '0');
+    var cached = _cacheGet(_cloudCache.heat, ck);
+    if (cached) {{
+        _renderKeyHeat(cached);
+        return;
+    }}
     fetch(url)
         .then(function(r) {{ return r.json(); }})
         .then(function(data) {{
-            try {{
-                if (loading) loading.style.display = 'none';
-                if (data.error && data.ranking === null) {{
-                    if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
-                    return;
-                }}
-                var rows = data.ranking || [];
-                if (rows.length === 0) {{
-                    if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无按键热度数据</div>';
-                    return;
-                }}
-                var maxCount = rows[0].total_count || 1;
-                var html = '';
-                rows.forEach(function(row, idx) {{
-                    var pct = Math.round((row.total_count || 0) / maxCount * 100);
-                    var rankCls = '';
-                    if (idx === 0) rankCls = ' top1';
-                    else if (idx === 1) rankCls = ' top2';
-                    else if (idx === 2) rankCls = ' top3';
-                    html += '<div class="rank-row">' +
-                        '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
-                        '<span class="rank-key">' + (row.key_name || '???') + '</span>' +
-                        '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
-                        '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
-                }});
-                if (list) list.innerHTML = html;
-            }} catch(e) {{
-                if (loading) loading.style.display = 'none';
-                if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">数据解析失败: ' + (e.message || '未知') + '</div>';
-            }}
+            _cachePut(_cloudCache.heat, ck, data);
+            _renderKeyHeat(data);
         }})
         .catch(function() {{
             if (loading) loading.style.display = 'none';
             if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">网络请求失败，请确认 KeyHeatmap 后端服务已启动</div>';
         }});
+}}
+
+function _renderKeyHeat(data) {{
+    var loading = document.getElementById('cloudLoading');
+    var list = document.getElementById('cloudHeatList');
+    try {{
+        if (loading) loading.style.display = 'none';
+        if (data.error && data.ranking === null) {{
+            if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
+            return;
+        }}
+        var rows = data.ranking || [];
+        if (rows.length === 0) {{
+            if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无按键热度数据</div>';
+            return;
+        }}
+        var maxCount = rows[0].total_count || 1;
+        var html = '';
+        rows.forEach(function(row, idx) {{
+            var pct = Math.round((row.total_count || 0) / maxCount * 100);
+            var rankCls = '';
+            if (idx === 0) rankCls = ' top1';
+            else if (idx === 1) rankCls = ' top2';
+            else if (idx === 2) rankCls = ' top3';
+            html += '<div class="rank-row">' +
+                '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
+                '<span class="rank-key">' + (row.key_name || '???') + '</span>' +
+                '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
+                '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
+        }});
+        if (list) list.innerHTML = html;
+    }} catch(e) {{
+        if (loading) loading.style.display = 'none';
+        if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">数据解析失败: ' + (e.message || '未知') + '</div>';
+    }}
 }}
 
 checkUserRegistration();
@@ -3576,6 +3612,25 @@ class HeatmapServer:
         sync_t.start()
         # 启动后端（8000）
         self._start_backend()
+        # 远程模式下启动保活心跳，防止 Render free 实例休眠（冷启动 30~60s 是加载慢主因）
+        if CLOUD_API_URL:
+            keepalive_t = threading.Thread(target=self._keepalive_loop, daemon=True, name="cloud-keepalive")
+            keepalive_t.start()
+            log(f"Cloud keepalive started -> {CLOUD_API_URL}")
+
+    def _keepalive_loop(self):
+        """远程模式保活：每 8 分钟 ping 一次 /api/health，保持 Render 实例清醒"""
+        import urllib.request
+        url = CLOUD_API_URL.rstrip("/") + "/api/health"
+        fail = 0
+        while True:
+            try:
+                urllib.request.urlopen(url, timeout=10)
+                fail = 0
+            except Exception as e:
+                fail += 1
+                log(f"cloud keepalive ping failed ({fail}): {e}")
+            self._sync_stop.wait(480)
 
     def _cloud_sync_loop(self):
         """后台定时同步：启动立即执行一次，之后每 30 分钟上传各登录用户当天数据"""
