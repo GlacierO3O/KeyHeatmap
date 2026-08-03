@@ -37,7 +37,7 @@ RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
-CLOUD_API_URL = None  # 例如 "https://keyheatmap-api.onrender.com"
+CLOUD_API_URL = "https://keyheatmap-api.onrender.com"  # 远程后端，直接走云端
 API_BASE_URL = CLOUD_API_URL or "http://127.0.0.1:8000"
 
 # ─── Authing OIDC 登录 ─────────────────────────
