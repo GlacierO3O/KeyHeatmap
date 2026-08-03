@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "3.6.0"
+CURRENT_VERSION = "4.0.0 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
 RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/latest/download/KeyHeatmap.exe"
