@@ -2452,11 +2452,11 @@ var _cloudLoaded = false;
 var _cloudTab = 'total';   // total=总按键排行, heat=按键热度分析
 var _includeMouse = true;  // 总按键排行是否包含鼠标三键（默认包含）
 // 30 秒 TTL 缓存：避免切换标签/开关时反复请求云端
-var _cloudCache = { lb: null, lbKey: null, lbTs: 0, heat: null, heatKey: null, heatTs: 0 };
+var _cloudCache = {{ lb: {{key: null, ts: 0, data: null}}, heat: {{key: null, ts: 0, data: null}} }};
 var _CACHE_TTL = 30000;
 
 function _cacheGet(cache, key) {{
-    return (cache.key === key && Date.now() - cache.ts < _CACHE_TTL) ? cache.data : null;
+    return (cache && cache.key === key && Date.now() - cache.ts < _CACHE_TTL) ? cache.data : null;
 }}
 function _cachePut(cache, key, data) {{
     cache.key = key; cache.ts = Date.now(); cache.data = data;
