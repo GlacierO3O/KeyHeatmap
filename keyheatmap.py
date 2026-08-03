@@ -2223,6 +2223,7 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
 
         <div id="cloudRankingList">
             <div style="color:var(--text-dim);text-align:center;padding:20px;">[v3]正在加载云端数据...</div>
+            <div style="color:var(--text-dim);text-align:center;font-size:12px;padding:0 0 16px;">云端服务部署在海外，首次加载约需 10 秒，请耐心等待</div>
         </div>
         <!-- 按键热度分析排行（默认隐藏） -->
         <div id="cloudHeatList" style="display:none;">
