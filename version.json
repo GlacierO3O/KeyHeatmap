@@ -1,15 +1,22 @@
 {
-  "version": "4.0.1 Public Beta",
-  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.1-public-beta/KeyHeatmap.exe",
-  "notes": "KeyHeatmap v4.0.1 Public Beta\n- 后端迁移至腾讯云国内服务器\n- 修复云端同步 500 错误",
+  "version": "4.0.2 Public Beta",
+  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.2-public-beta/KeyHeatmap.exe",
+  "notes": "KeyHeatmap v4.0.2 Public Beta\n- 修复开机自启（计划任务改为最高权限并支持电池启动）\n- 修复云端排行昵称修改弹窗透明问题\n- 更新弹窗新增 Gitee 下载入口",
   "announcement": {
-    "id": "v4.0.1-pb",
-    "title": "KeyHeatmap v4.0.1 Public Beta 已发布",
+    "id": "v4.0.2-pb",
+    "title": "KeyHeatmap v4.0.2 Public Beta 已发布",
     "level": "important",
-    "body": "本次更新：\n- 云端后端迁移至腾讯云国内服务器，排行榜加载大幅提速\n- 修复云端数据同步失败（HTTP 500）问题\n- 修复按键名大小写重复导致上传冲突",
+    "body": "本次更新：\n- 修复开机自启失效（最高权限运行 + 支持电池启动）\n- 修复云端排行昵称修改弹窗透明问题\n- 更新弹窗新增 Gitee 下载入口",
     "date": "2026-08-03"
   },
   "announcement_history": [
+    {
+      "id": "v4.0.1-pb",
+      "title": "KeyHeatmap v4.0.1 Public Beta 已发布",
+      "level": "important",
+      "body": "本次更新：\n- 云端后端迁移至腾讯云国内服务器，排行榜加载大幅提速\n- 修复云端数据同步失败（HTTP 500）问题\n- 修复按键名大小写重复导致上传冲突",
+      "date": "2026-08-03"
+    },
     {
       "id": "v4.0.0-pb",
       "title": "KeyHeatmap v4.0.0 Public Beta 已发布",

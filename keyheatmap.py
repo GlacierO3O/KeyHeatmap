@@ -30,10 +30,10 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "4.0.1 Public Beta"
+CURRENT_VERSION = "4.0.2 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
-RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.0-public-beta/KeyHeatmap.exe"
+RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.2-public-beta/KeyHeatmap.exe"
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
@@ -1160,6 +1160,11 @@ body {
     color: #c9d1d9; padding: 8px 20px; border-radius: 8px;
     cursor: pointer; font-size: 13px;
 }
+.update-btns .btn-gitee {
+    background: #d90013; border: 1px solid rgba(255,255,255,0.15);
+    color: #fff; padding: 8px 20px; border-radius: 8px;
+    cursor: pointer; font-size: 13px;
+}
 .update-skip { display: flex; align-items: center; gap: 6px; margin-right: auto; }
 .update-skip label {
     font-size: 12px; color: var(--text-dim); cursor: pointer; user-select: none;
@@ -2041,6 +2046,7 @@ function switchSubTab(name) {{
 <button class="btn-cancel" onclick="dismissUpdate()">取消</button>
 <button class="btn-update" onclick="doUpdate()">立即更新</button>
 <button class="btn-github" onclick="window.open('https://github.com/GlacierO3O/KeyHeatmap/releases/latest')">去 GitHub 下载</button>
+<button class="btn-gitee" onclick="window.open('https://gitee.com/glacier-ice-cubes/key-heatmap/releases')">Gitee 下载</button>
 </div>
 <div id="update-status" class="status-msg"></div>
 </div>
@@ -2088,8 +2094,8 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
     display: flex; align-items: center; gap: 10px;
     padding: 10px 16px; margin-bottom: 8px;
     border-radius: 10px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border);
+    background: var(--bg-card);
+    border: 1px solid var(--text-dim);
 }}
 #cloudUserArea .user-hint {{
     color: var(--text-dim); font-size: 13px;
@@ -2109,11 +2115,11 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
 }}
 .leave-link:hover {{ background: rgba(239,68,68,0.3); }}
 .sync-btn {{
-    padding: 6px 18px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--bg-secondary); color: var(--text-bright); font-size: 13px;
+    padding: 6px 18px; border: 1px solid var(--text-dim); border-radius: 8px;
+    background: var(--bg-card); color: var(--text-bright); font-size: 13px;
     cursor: pointer; transition: all 0.2s; margin-left: 4px;
 }}
-.sync-btn:hover {{ background: var(--bg-primary); border-color: #6366f1; }}
+.sync-btn:hover {{ background: var(--bg-tab-active); border-color: #6366f1; }}
 .sync-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
 .user-badge {{
     display: inline-block; padding: 2px 10px; border-radius: 12px;
@@ -2138,7 +2144,7 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
     align-items: center; justify-content: center; z-index: 1000;
 }}
 .modal-box {{
-    background: var(--bg-primary); border: 1px solid var(--border);
+    background: var(--bg-card); border: 1px solid var(--text-dim);
     border-radius: 14px; padding: 28px 32px; width: 380px; max-width: 90vw;
     box-shadow: 0 8px 32px rgba(0,0,0,0.3);
 }}
@@ -2150,8 +2156,8 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
 }}
 .modal-box input {{
     width: 100%; box-sizing: border-box; padding: 10px 14px;
-    border: 1px solid var(--border); border-radius: 8px;
-    background: var(--bg-secondary); color: var(--text-bright);
+    border: 1px solid var(--text-dim); border-radius: 8px;
+    background: var(--bg-tab-bar); color: var(--text-bright);
     font-size: 15px; outline: none; margin-bottom: 18px;
 }}
 .modal-box input:focus {{ border-color: #6366f1; }}
@@ -2167,8 +2173,8 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
     background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff;
 }}
 .modal-btn-cancel {{
-    background: var(--bg-secondary); color: var(--text-dim);
-    border: 1px solid var(--border);
+    background: var(--bg-tab-bar); color: var(--text-dim);
+    border: 1px solid var(--text-dim);
 }}
 
 /* ── 云端排行昵称单行截断 ── */
@@ -4268,11 +4274,17 @@ class TrayApp:
                     self.autostart_enabled = True
             except (FileNotFoundError, OSError):
                 pass
+        # 修复旧任务：确保最高权限运行并允许电池供电时启动
+        if self.autostart_enabled:
+            subprocess.run(['schtasks', '/change', '/tn', 'KeyHeatmap', '/rl', 'highest'], capture_output=True, text=True)
+            subprocess.run(['powershell', '-NoProfile', '-Command', 'Set-ScheduledTask -TaskName KeyHeatmap -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable)'], capture_output=True, text=True)
 
     def _create_autostart(self):
         cmd = self._get_autostart_cmd()
         # onlogon + 15 秒延迟（mmmm:ss 格式），等桌面/explorer 就绪后再启动，避免托盘被会话隔离拒绝访问
-        subprocess.run(['schtasks', '/create', '/tn', 'KeyHeatmap', '/tr', cmd, '/sc', 'onlogon', '/delay', '0000:15', '/f', '/rl', 'limited'], capture_output=True, text=True)
+        subprocess.run(['schtasks', '/create', '/tn', 'KeyHeatmap', '/tr', cmd, '/sc', 'onlogon', '/delay', '0000:15', '/f', '/rl', 'highest', '/it'], capture_output=True, text=True)
+        # 允许电池供电时启动，避免笔记本插电才生效
+        subprocess.run(['powershell', '-NoProfile', '-Command', 'Set-ScheduledTask -TaskName KeyHeatmap -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable)'], capture_output=True, text=True)
         try:
             import winreg
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\KeyHeatmap")
