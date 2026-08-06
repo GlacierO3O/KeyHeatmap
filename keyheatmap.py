@@ -30,10 +30,10 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "4.0.2 Public Beta"
+CURRENT_VERSION = "4.0.3 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
-RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.2-public-beta/KeyHeatmap.exe"
+RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.3-public-beta/KeyHeatmap.exe"
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
