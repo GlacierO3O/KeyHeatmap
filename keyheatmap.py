@@ -30,10 +30,10 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "4.0.3 Public Beta"
+CURRENT_VERSION = "4.0.4 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
-RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.3-public-beta/KeyHeatmap.exe"
+RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.4-public-beta/KeyHeatmap.exe"
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
@@ -3036,6 +3036,23 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             self._json_response({"leaderboard_include_mouse": not current})
             return True
 
+        if path == "/api/tray/state":
+            listener = getattr(HeatmapHandler, "listener", None)
+            tray = getattr(HeatmapHandler, "tray", None)
+            self._json_response({
+                "paused": bool(listener and listener.paused),
+                "autostart": bool(tray and tray.autostart_enabled),
+            })
+            return True
+
+        if path == "/api/pause":
+            listener = getattr(HeatmapHandler, "listener", None)
+            if listener and hasattr(listener, "toggle_pause"):
+                self._json_response({"paused": listener.toggle_pause()})
+            else:
+                self._json_response({"error": "listener not ready"}, 503)
+            return True
+
         return False
 
     def _handle_api_post(self, path):
@@ -3112,6 +3129,23 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                 self._json_response(result)
             else:
                 self._json_response({"error": result}, 500)
+            return True
+
+        if path == "/api/pause":
+            listener = getattr(HeatmapHandler, "listener", None)
+            if listener and hasattr(listener, "toggle_pause"):
+                self._json_response({"paused": listener.toggle_pause()})
+            else:
+                self._json_response({"error": "listener not ready"}, 503)
+            return True
+
+        if path == "/api/quit":
+            tray = getattr(HeatmapHandler, "tray", None)
+            if tray and hasattr(tray, "_on_quit"):
+                tray._on_quit(None, None)
+                self._json_response({"ok": True})
+            else:
+                self._json_response({"error": "tray not ready"}, 503)
             return True
 
         return False
@@ -4381,6 +4415,42 @@ class TrayApp:
         )
 
     def run(self):
+        if self._launch_tray_helper():
+            log("tray helper launched, main running headless")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            return
+        self._run_tray_inline()
+
+    def _launch_tray_helper(self):
+        if not getattr(sys, "frozen", False):
+            return False
+        helper = os.path.join(os.path.dirname(sys.executable), "tray_helper.exe")
+        try:
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                bundled = os.path.join(meipass, "tray_helper", "tray_helper.exe")
+                if os.path.exists(bundled):
+                    target = DATA_DIR / "tray_helper.exe"
+                    import shutil
+                    shutil.copy2(bundled, target)
+                    helper = str(target)
+        except Exception as e:
+            log(f"tray helper extract failed: {e}")
+        if not os.path.exists(helper):
+            return False
+        try:
+            subprocess.Popen(["explorer.exe", helper])
+            log(f"tray helper launched: {helper}")
+            return True
+        except Exception as e:
+            log(f"tray helper launch failed: {e}")
+            return False
+
+    def _run_tray_inline(self):
         from pystray import Menu, MenuItem, Icon
         tray_icon = create_tray_icon()
         auto_label = "🚀 开机自启  ✓" if self.autostart_enabled else "🚀 开机自启"
@@ -4455,6 +4525,7 @@ def main():
 
     listener = KeyListener(stats, overlay, settings)
     listener.start()
+    HeatmapHandler.listener = listener
 
     log("all components started, entering tray loop")
     tray = TrayApp(stats, listener, server, overlay)
