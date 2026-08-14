@@ -47,9 +47,23 @@ def _cleanup_hidden_users():
     try:
         conn = get_conn()
         with conn.cursor() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS app_stats (
+                    user_id VARCHAR(128) NOT NULL,
+                    stat_date DATE NOT NULL,
+                    app_name VARCHAR(128) NOT NULL,
+                    count INT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, stat_date, app_name),
+                    KEY idx_app_date (stat_date, app_name)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+            )
             placeholders = ", ".join(["%s"] * len(HIDDEN_USER_IDS))
             cur.execute(
                 f"DELETE FROM key_stats WHERE user_id IN ({placeholders})",
+                list(HIDDEN_USER_IDS),
+            )
+            cur.execute(
+                f"DELETE FROM app_stats WHERE user_id IN ({placeholders})",
                 list(HIDDEN_USER_IDS),
             )
             deleted = cur.rowcount
@@ -69,6 +83,7 @@ def get_conn():
 _CACHE_LOCK = threading.Lock()
 _LEADERBOARD_CACHE = {"key": None, "ts": 0.0, "data": None}
 _KEYHEAT_CACHE = {"key": None, "ts": 0.0, "data": None}
+_APP_LEADERBOARD_CACHE = {"key": None, "ts": 0.0, "data": None}
 _CACHE_TTL = 30.0
 
 
@@ -98,8 +113,16 @@ class KeyStatItem(BaseModel):
     count: int
 
 
+class AppStatItem(BaseModel):
+    user_id: str
+    stat_date: date
+    app_name: str
+    count: int
+
+
 class UploadPayload(BaseModel):
     items: List[KeyStatItem]
+    apps: Optional[List[AppStatItem]] = None
 
 
 class UserInfo(BaseModel):
@@ -158,7 +181,7 @@ def health():
 # ---------- Upload ----------
 @app.post("/api/upload")
 def upload(payload: UploadPayload):
-    if not payload.items:
+    if not payload.items and not payload.apps:
         raise HTTPException(400, "empty items")
 
     conn = get_conn()
@@ -185,8 +208,29 @@ def upload(payload: UploadPayload):
                 """
                 params = items
                 cur.executemany(sql, params)
+            # 应用按键统计：同样按 user+date 覆盖，应用名大小写不敏感合并
+            if payload.apps:
+                app_merged = {}
+                for it in payload.apps:
+                    key = (it.user_id, it.stat_date, it.app_name.casefold())
+                    if key not in app_merged:
+                        app_merged[key] = [it.user_id, it.stat_date, it.app_name, 0]
+                    app_merged[key][3] += it.count
+                app_by_user = {}
+                for uid, stat_date, app_name, count in app_merged.values():
+                    app_by_user.setdefault((uid, stat_date), []).append((uid, stat_date, app_name, count))
+                for (user_id, stat_date), items in app_by_user.items():
+                    cur.execute(
+                        "DELETE FROM app_stats WHERE user_id = %s AND stat_date = %s",
+                        (user_id, stat_date),
+                    )
+                    cur.executemany(
+                        """INSERT INTO app_stats (user_id, stat_date, app_name, count)
+                           VALUES (%s, %s, %s, %s)""",
+                        items,
+                    )
         conn.commit()
-        return {"inserted": len(payload.items)}
+        return {"inserted": len(payload.items), "apps_inserted": len(payload.apps) if payload.apps else 0}
     finally:
         conn.close()
 
@@ -334,6 +378,53 @@ def keyheat(
 
         result = {"ranking": ranking}
         _set_cached(_KEYHEAT_CACHE, ck, result)
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/app-leaderboard")
+def app_leaderboard(
+    target_date: Optional[date] = None,
+    limit: int = 30,
+):
+    """今日应用按键榜：按 app_name 聚合全用户按键次数"""
+    ck = (str(target_date), limit)
+    cached = _get_cached(_APP_LEADERBOARD_CACHE, ck)
+    if cached is not None:
+        return cached
+
+    conn = get_conn()
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            where = []
+            params = []
+            if target_date:
+                where.append("stat_date = %s")
+                params.append(target_date)
+            if HIDDEN_USER_IDS:
+                placeholders = ", ".join(["%s"] * len(HIDDEN_USER_IDS))
+                where.append(f"user_id NOT IN ({placeholders})")
+                params.extend(HIDDEN_USER_IDS)
+            where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+            sql = f"""
+                SELECT app_name, SUM(count) AS total_count
+                FROM app_stats
+                {where_clause}
+                GROUP BY app_name
+                ORDER BY total_count DESC
+                LIMIT %s
+            """
+            params.append(limit)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        result = {
+            "apps": [
+                {"rank": i + 1, "app_name": r["app_name"], "total_count": r["total_count"]}
+                for i, r in enumerate(rows)
+            ]
+        }
+        _set_cached(_APP_LEADERBOARD_CACHE, ck, result)
         return result
     finally:
         conn.close()
