@@ -1,15 +1,22 @@
 {
-  "version": "4.0.4 Public Beta",
-  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.4-public-beta/KeyHeatmap.exe",
-  "notes": "KeyHeatmap v4.0.4 Public Beta\n- 新增非管理员托盘助手，修复开机自启后托盘图标不显示\n- 修复打包遗漏 overlay_engine 模块\n- 修复云端排行昵称修改弹窗透明问题\n- 更新弹窗新增 Gitee 下载入口",
+  "version": "4.0.5 Public Beta",
+  "url": "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.5-public-beta/KeyHeatmap.exe",
+  "notes": "KeyHeatmap v4.0.5 Public Beta\n- 新增应用级按键统计与云端今日应用榜\n- 内置常用应用名映射，未映射应用自动去掉 .exe 后缀\n- 修复轮询模式下应用统计未记录的问题\n- 应用榜长名称显示优化",
   "announcement": {
-    "id": "v4.0.4-pb",
-    "title": "KeyHeatmap v4.0.4 Public Beta 已发布",
+    "id": "v4.0.5-pb",
+    "title": "KeyHeatmap v4.0.5 Public Beta 已发布",
     "level": "important",
-    "body": "本次更新：\n- 新增非管理员托盘助手，修复开机自启后托盘图标不显示\n- 修复打包遗漏 overlay_engine 模块，解决其他电脑启动报错\n- 修复云端排行昵称修改弹窗透明问题\n- 更新弹窗新增 Gitee 下载入口",
-    "date": "2026-08-03"
+    "body": "本次更新：\n- 新增应用级按键统计，本地可看每个应用用了多少次键盘\n- 新增云端今日应用榜，看看今天大家用哪个应用最多\n- 内置常用应用名映射，未映射的应用自动去掉 .exe 后缀\n- 修复轮询模式下应用统计未记录的问题",
+    "date": "2026-08-16"
   },
   "announcement_history": [
+    {
+      "id": "v4.0.4-pb",
+      "title": "KeyHeatmap v4.0.4 Public Beta 已发布",
+      "level": "important",
+      "body": "本次更新：\n- 新增非管理员托盘助手，修复开机自启后托盘图标不显示\n- 修复打包遗漏 overlay_engine 模块，解决其他电脑启动报错\n- 修复云端排行昵称修改弹窗透明问题\n- 更新弹窗新增 Gitee 下载入口",
+      "date": "2026-08-03"
+    },
     {
       "id": "v4.0.3-pb",
       "title": "KeyHeatmap v4.0.3 Public Beta 已发布",

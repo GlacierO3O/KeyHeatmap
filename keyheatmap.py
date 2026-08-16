@@ -30,10 +30,10 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, urlparse, urlencode
 
-CURRENT_VERSION = "4.0.4 Public Beta"
+CURRENT_VERSION = "4.0.5 Public Beta"
 VERSION_URL = "https://raw.githubusercontent.com/GlacierO3O/KeyHeatmap/main/version.json"
 VERSION_URL_CDN = "https://cdn.jsdelivr.net/gh/GlacierO3O/KeyHeatmap@main/version.json"
-RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.4-public-beta/KeyHeatmap.exe"
+RELEASE_URL = "https://github.com/GlacierO3O/KeyHeatmap/releases/download/v4.0.5-public-beta/KeyHeatmap.exe"
 
 # ─── FastAPI Backend ───────────────────────────
 # 远程后端模式：设为 Render 部署地址即可启用，None 为本地模式（内嵌后端+直连DB）
@@ -89,6 +89,7 @@ class Settings:
             "mouse_tracking_enabled": False,
             "leaderboard_include_mouse": True,
             "mouse_in_overlay": False,
+            "app_stats_enabled": True,
             "float_opacity": 88,
             "glass_enabled": True,
             "theme_day_time": "06:00",
@@ -249,11 +250,14 @@ def api_register_user(device_id, nickname):
     return _api_request("POST", "/api/user", {"device_id": device_id, "nickname": nickname})
 
 
-def api_upload_stats(items):
+def api_upload_stats(items, apps=None):
     """上报统计数据：POST /api/upload
     items: [{"user_id": str, "stat_date": "YYYY-MM-DD", "key_name": str, "count": int}, ...]
     """
-    return _api_request("POST", "/api/upload", {"items": items})
+    payload = {"items": items}
+    if apps:
+        payload["apps"] = apps
+    return _api_request("POST", "/api/upload", payload)
 
 
 def api_get_leaderboard(target_date=None, limit=30, include_mouse=True):
@@ -272,6 +276,13 @@ def api_get_keyheat(target_date=None, limit=50, include_mouse=True):
     include_mouse=False 时排除鼠标三键（LMB/RMB/MMB）
     """
     path = f"/api/keyheat?limit={limit}&include_mouse={'true' if include_mouse else 'false'}"
+    if target_date:
+        path += f"&target_date={target_date}"
+    return _api_request("GET", path)
+
+
+def api_get_app_leaderboard(target_date=None, limit=30):
+    path = f"/api/app-leaderboard?limit={limit}"
     if target_date:
         path += f"&target_date={target_date}"
     return _api_request("GET", path)
@@ -371,10 +382,92 @@ KEY_NAME_MAP = {
 
 # ─── 数据管理 ──────────────────────────────────
 
+# ─── 应用名转译（进程名 → 日常名） ──────────────────
+APP_NAME_MAP = {
+    "chrome.exe": "Chrome", "msedge.exe": "Edge", "firefox.exe": "Firefox",
+    "360se.exe": "360浏览器", "qqbrowser.exe": "QQ浏览器", "sogouexplorer.exe": "搜狗浏览器",
+    "baidubrowser.exe": "百度浏览器", "opera.exe": "Opera", "brave.exe": "Brave",
+    "yandex.exe": "Yandex",
+    "wechat.exe": "微信", "weixin.exe": "微信", "wxwork.exe": "企业微信",
+    "qq.exe": "QQ", "qqsclauncher.exe": "QQ", "dingtalk.exe": "钉钉",
+    "feishu.exe": "飞书", "lark.exe": "飞书", "telegram.exe": "Telegram",
+    "discord.exe": "Discord", "slack.exe": "Slack",
+    "winword.exe": "Word", "excel.exe": "Excel", "powerpnt.exe": "PowerPoint",
+    "wps.exe": "WPS", "et.exe": "WPS表格", "wpp.exe": "WPS演示",
+    "code.exe": "VS Code", "devenv.exe": "Visual Studio", "pycharm64.exe": "PyCharm",
+    "idea64.exe": "IntelliJ IDEA", "goland64.exe": "GoLand", "webstorm64.exe": "WebStorm",
+    "sublime_text.exe": "Sublime Text", "obsidian.exe": "Obsidian", "typora.exe": "Typora",
+    "notepad.exe": "记事本", "windowsterminal.exe": "终端", "cmd.exe": "命令提示符",
+    "powershell.exe": "PowerShell", "python.exe": "Python", "node.exe": "Node.js",
+    "git-bash.exe": "Git Bash", "postman.exe": "Postman", "navicat.exe": "Navicat",
+    "photoshop.exe": "Photoshop", "illustrator.exe": "Illustrator",
+    "premiere pro.exe": "Premiere", "afterfx.exe": "After Effects", "audition.exe": "Audition",
+    "after effects.exe": "After Effects",
+    "cloudmusic.exe": "网易云音乐", "qqmusic.exe": "QQ音乐", "kugou.exe": "酷狗音乐",
+    "bilibili.exe": "哔哩哔哩", "douyin.exe": "抖音", "iQIYI.exe": "爱奇艺",
+    "youku.exe": "优酷", "直播伴侣 launcher.exe": "抖音直播伴侣",
+    "steam.exe": "Steam", "epicgameslauncher.exe": "Epic", "wegame.exe": "WeGame",
+    "wegamelauncher.exe": "WeGame",
+    "leagueclient.exe": "英雄联盟", "league of legends.exe": "英雄联盟",
+    "valorant.exe": "无畏契约", "genshinimpact.exe": "原神", "yuansheng.exe": "原神",
+    "starrail.exe": "崩坏：星穹铁道", "zenlesszonezero.exe": "绝区零",
+    "minecraft.exe": "Minecraft", "minecraftlauncher.exe": "Minecraft",
+    "csgo.exe": "CS2", "cs2.exe": "CS2", "dota2.exe": "Dota2",
+    "crossfire.exe": "穿越火线", "dnf.exe": "DNF", "hearthstone.exe": "炉石传说",
+    "overwatch.exe": "守望先锋", "r5apex.exe": "Apex英雄", "naraka.exe": "永劫无间",
+    "yuanzheng.exe": "元梦之星",
+    "explorer.exe": "文件资源管理器", "taskmgr.exe": "任务管理器",
+    "mspaint.exe": "画图", "calc.exe": "计算器",
+}
+
+APP_NAME_MAP_LOWER = {k.lower(): v for k, v in APP_NAME_MAP.items()}
+
+
+def resolve_app_name(proc_name):
+    """进程名转日常应用名：用户映射（后续） > 内置映射 > 原名"""
+    if not proc_name:
+        return "未知"
+    base = os.path.basename(proc_name)
+    mapped = APP_NAME_MAP_LOWER.get(base.lower())
+    if mapped:
+        return mapped
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    return base
+
+
+def get_foreground_app():
+    """返回当前前台窗口的进程名，失败返回 None"""
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return None
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)
+        if not handle:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(len(buf))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return os.path.basename(buf.value)
+            return None
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return None
+
+
 class KeyStats:
     def __init__(self):
         self.today = datetime.now().strftime("%Y-%m-%d")
         self.stats = {"all": defaultdict(int), "daily": {}}
+        self.stats["app_daily"] = {}
         self.hourly = {}  # {date: {hour: count}}
         self.lock = threading.Lock()
         self._load()
@@ -398,6 +491,7 @@ class KeyStats:
                     data = json.load(f)
                 self.stats["all"] = defaultdict(int, data.get("all", {}))
                 self.stats["daily"] = data.get("daily", {})
+                self.stats["app_daily"] = data.get("app_daily", {})
                 self.hourly = data.get("hourly", {})
                 if "cloud_synced" in data:
                     self.stats["cloud_synced"] = data["cloud_synced"]
@@ -405,7 +499,8 @@ class KeyStats:
                 log(f"stats load failed: {e}")
 
     def _save(self):
-        data = {"all": dict(self.stats["all"]), "daily": self.stats["daily"], "hourly": self.hourly}
+        data = {"all": dict(self.stats["all"]), "daily": self.stats["daily"],
+                "hourly": self.hourly, "app_daily": self.stats.get("app_daily", {})}
         if "cloud_synced" in self.stats:
             data["cloud_synced"] = self.stats["cloud_synced"]
         with open(STATS_FILE, "w", encoding="utf-8") as f:
@@ -438,6 +533,16 @@ class KeyStats:
             if today not in self.hourly:
                 self.hourly[today] = {}
             self.hourly[today][str(hour)] = self.hourly[today].get(str(hour), 0) + 1
+
+    def record_app(self, app_name):
+        if not app_name:
+            return
+        with self.lock:
+            self._check_day_rollover()
+            today = self.today
+            if today not in self.stats["app_daily"]:
+                self.stats["app_daily"][today] = {}
+            self.stats["app_daily"][today][app_name] = self.stats["app_daily"][today].get(app_name, 0) + 1
 
     def get_display_name(self, raw_key):
         parts = str(raw_key).split(".")
@@ -502,6 +607,28 @@ class KeyStats:
         data = self.get_data(period)
         sorted_items = sorted(data.items(), key=lambda x: x[1], reverse=True)
         return sorted_items[:top_n]
+
+    def get_app_data(self, period="today"):
+        """返回应用按键分布 {app_name: count}"""
+        with self.lock:
+            if period == "today":
+                return dict(self.stats.get("app_daily", {}).get(datetime.now().strftime("%Y-%m-%d"), {}))
+            if period == "week":
+                result = defaultdict(int)
+                for i in range(7):
+                    d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                    for k, v in self.stats.get("app_daily", {}).get(d, {}).items():
+                        result[k] += v
+                return dict(result)
+            result = defaultdict(int)
+            for day_data in self.stats.get("app_daily", {}).values():
+                for k, v in day_data.items():
+                    result[k] += v
+            return dict(result)
+
+    def get_app_ranking(self, period="today", top_n=30):
+        data = self.get_app_data(period)
+        return sorted(data.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
     def save_and_snapshot(self):
         with self.lock:
@@ -1001,6 +1128,11 @@ body {
     color: var(--text-mid); font-size: 12px;
     flex-shrink: 0;
 }
+#sub-apps .rank-key {
+    width: 140px; flex-shrink: 0;
+    text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#sub-apps .rank-bar-wrap { min-width: 60px; }
 .legend { 
     display: flex; align-items: center; justify-content: center; gap: 12px;
     margin: 20px auto;
@@ -1037,6 +1169,13 @@ body {
 }
 .sub-tab:hover { color: var(--text-primary); }
 .sub-tab.active { background: var(--bg-tab-active); color: var(--text-bright); box-shadow: var(--tab-shadow); }
+.app-periods { display: flex; gap: 6px; margin-bottom: 12px; }
+.app-period-btn {
+    padding: 5px 14px; border: 1px solid var(--text-dim); border-radius: 8px;
+    background: transparent; color: var(--text-mid); font-size: 12px; cursor: pointer;
+}
+.app-period-btn.active { background: var(--bg-tab-active); color: var(--text-bright); border-color: var(--accent-from); }
+.app-list { display: flex; flex-direction: column; gap: 8px; }
 .mouse-toggle-btn {
     margin-left: auto; padding: 4px 10px; border-radius: 6px; cursor: pointer;
     font-size: 12px; font-weight: 500; border: 1px solid var(--border-color);
@@ -1727,6 +1866,7 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
         <button class="sub-tab active" onclick="switchSubTab('ranking')">按键排行</button>
         <button class="sub-tab" onclick="switchSubTab('hourly')">时段热图</button>
         <button class="sub-tab" onclick="switchSubTab('trend')">趋势折线</button>
+        <button class="sub-tab" onclick="switchSubTab('apps')">应用统计</button>
     </div>
     <div id="sub-ranking" class="sub-panel">
         <div class="ranking">
@@ -1743,6 +1883,15 @@ def build_dashboard_html(data, period_label, max_count, theme, badge, ranking, h
         <div class="panel-title">近7天趋势</div>
         <div class="trend-wrap">
 {trend_svg}<div class="chart-tooltip" id="trend-tooltip"></div></div>
+    </div>
+    <div id="sub-apps" class="sub-panel" style="display:none">
+        <div class="panel-title">应用按键分布</div>
+        <div class="app-periods">
+            <button class="app-period-btn active" data-period="today" onclick="loadApps('today')">今天</button>
+            <button class="app-period-btn" data-period="week" onclick="loadApps('week')">本周</button>
+            <button class="app-period-btn" data-period="all" onclick="loadApps('all')">全部</button>
+        </div>
+        <div id="appList" class="app-list"><div style="color:var(--text-dim);padding:20px;text-align:center;">加载中...</div></div>
     </div>
 
 </div>
@@ -2031,6 +2180,40 @@ function switchSubTab(name) {{
     document.querySelectorAll('.sub-panel').forEach(function(p) {{ p.style.display = 'none'; }});
     event.target.classList.add('active');
     document.getElementById('sub-' + name).style.display = '';
+    if (name === 'apps') loadApps();
+}}
+
+function loadApps(period) {{
+    period = period || 'today';
+    document.querySelectorAll('.app-period-btn').forEach(function(b) {{ b.classList.toggle('active', b.dataset.period === period); }});
+    fetch('/api/stats/apps?period=' + period)
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            var list = document.getElementById('appList');
+            if (data.enabled === false) {{
+                list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">应用统计已关闭，可在设置页开启</div>';
+                return;
+            }}
+            var apps = data.apps || [];
+            if (apps.length === 0) {{
+                list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">暂无应用数据</div>';
+                return;
+            }}
+            var max = apps[0].count || 1;
+            var html = '';
+            apps.forEach(function(a, i) {{
+                var pct = Math.round((a.count || 0) / max * 100);
+                html += '<div class="rank-row">' +
+                    '<span class="rank-no' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>' +
+                    '<span class="rank-key" title="' + (a.name || '未知') + '">' + (a.name || '未知') + '</span>' +
+                    '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
+                    '<span class="rank-count">' + (a.count || 0).toLocaleString() + '</span></div>';
+            }});
+            list.innerHTML = html;
+        }})
+        .catch(function() {{
+            document.getElementById('appList').innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败</div>';
+        }});
 }}
 
 </script>
@@ -2182,6 +2365,10 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
     width: auto; max-width: 120px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
+#cloudAppList .rank-key {{
+    width: 140px; flex-shrink: 0;
+    text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
 
 /* ── 云端日期选择器（已移除） ── */
 </style>
@@ -2208,6 +2395,7 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
         <div class="sub-tabs" style="margin-bottom:12px;">
             <span class="sub-tab active" id="cloudTabTotal" onclick="switchCloudTab('total')">总按键排行</span>
             <span class="sub-tab" id="cloudTabHeat" onclick="switchCloudTab('heat')">按键热度</span>
+            <span class="sub-tab" id="cloudTabApps" onclick="switchCloudTab('apps')">今日应用榜</span>
             <span class="mouse-toggle-btn on" id="cloudMouseToggle" onclick="toggleCloudMouse()" title="是否将鼠标三键(LMB/RMB/MMB)计入总按键次数排行">包含鼠标键</span>
         </div>
 
@@ -2234,6 +2422,10 @@ def build_cloud_page_html(settings_obj, theme, url_theme=None):
         <!-- 按键热度分析排行（默认隐藏） -->
         <div id="cloudHeatList" style="display:none;">
             <div style="color:var(--text-dim);text-align:center;padding:20px;">按键热度加载中...</div>
+        </div>
+        <!-- 今日应用榜（默认隐藏） -->
+        <div id="cloudAppList" style="display:none;">
+            <div style="color:var(--text-dim);text-align:center;padding:20px;">今日应用榜加载中...</div>
         </div>
     </div>
 </div>
@@ -2473,14 +2665,20 @@ function switchCloudTab(tab) {{
     _cloudTab = tab;
     var tabTotal = document.getElementById('cloudTabTotal');
     var tabHeat = document.getElementById('cloudTabHeat');
+    var tabApps = document.getElementById('cloudTabApps');
     var list = document.getElementById('cloudRankingList');
     var heat = document.getElementById('cloudHeatList');
+    var apps = document.getElementById('cloudAppList');
     if (tabTotal) tabTotal.className = 'sub-tab' + (tab === 'total' ? ' active' : '');
     if (tabHeat) tabHeat.className = 'sub-tab' + (tab === 'heat' ? ' active' : '');
+    if (tabApps) tabApps.className = 'sub-tab' + (tab === 'apps' ? ' active' : '');
     if (list) list.style.display = (tab === 'total') ? '' : 'none';
     if (heat) heat.style.display = (tab === 'heat') ? '' : 'none';
+    if (apps) apps.style.display = (tab === 'apps') ? '' : 'none';
     if (tab === 'heat') {{
         loadKeyHeat();
+    }} else if (tab === 'apps') {{
+        loadCloudApps();
     }} else {{
         loadCloudLeaderboard();
     }}
@@ -2494,9 +2692,53 @@ function toggleCloudMouse() {{
     btn.textContent = _includeMouse ? '包含鼠标键' : '排除鼠标键';
     if (_cloudTab === 'heat') {{
         loadKeyHeat();
+    }} else if (_cloudTab === 'apps') {{
+        loadCloudApps();
     }} else {{
         loadCloudLeaderboard();
     }}
+}}
+
+
+function loadCloudApps() {{
+    var loading = document.getElementById('cloudLoading');
+    var list = document.getElementById('cloudAppList');
+    if (loading) loading.style.display = 'inline';
+    var _d = new Date();
+    var _td = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
+    fetch('/api/app-leaderboard/cloud?limit=30&target_date=' + encodeURIComponent(_td))
+        .then(function(r) {{ return r.json(); }})
+        .then(function(data) {{
+            if (loading) loading.style.display = 'none';
+            if (data.error && data.apps === null) {{
+                if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">加载失败: ' + (data.error || '未知错误') + '</div>';
+                return;
+            }}
+            var rows = data.apps || [];
+            if (rows.length === 0) {{
+                if (list) list.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:20px;">今日暂无应用数据</div>';
+                return;
+            }}
+            var maxCount = rows[0].total_count || 1;
+            var html = '';
+            rows.forEach(function(row, idx) {{
+                var pct = Math.round((row.total_count || 0) / maxCount * 100);
+                var rankCls = '';
+                if (idx === 0) rankCls = ' top1';
+                else if (idx === 1) rankCls = ' top2';
+                else if (idx === 2) rankCls = ' top3';
+                html += '<div class="rank-row">' +
+                    '<span class="rank-no' + rankCls + '">' + (idx + 1) + '</span>' +
+                    '<span class="rank-key" title="' + (row.app_name || '???') + '">' + (row.app_name || '???') + '</span>' +
+                    '<div class="rank-bar-wrap"><div class="rank-bar" style="width:' + pct + '%"></div></div>' +
+                    '<span class="rank-count">' + (row.total_count || 0).toLocaleString() + '</span></div>';
+            }});
+            if (list) list.innerHTML = html;
+        }})
+        .catch(function() {{
+            if (loading) loading.style.display = 'none';
+            if (list) list.innerHTML = '<div style="color:var(--danger);text-align:center;padding:20px;">网络请求失败，请确认 KeyHeatmap 后端服务已启动</div>';
+        }});
 }}
 
 
@@ -2642,6 +2884,7 @@ def build_settings_html(settings_obj, theme):
     auto_update_on = settings_obj.get("auto_update", True)
     autostart_on = HeatmapHandler.tray.autostart_enabled if getattr(HeatmapHandler, "tray", None) else False
     shortcut_on = HeatmapHandler.tray._check_desktop_shortcut() if getattr(HeatmapHandler, "tray", None) else False
+    app_stats_on = settings_obj.get("app_stats_enabled", True)
     whitelist = settings_obj.get("game_whitelist", [])
     day_time = settings_obj.get("theme_day_time", "06:00")
     night_time = settings_obj.get("theme_night_time", "18:00")
@@ -2748,6 +2991,7 @@ def build_settings_html(settings_obj, theme):
         <div class="card-title">快捷方式</div>
 {sg_toggle("桌面快捷方式", "在桌面上创建 KeyHeatmap 快捷方式，方便快速启动。再次点击可删除。", shortcut_on, "已创建", "未创建", "toggle_desktop_shortcut")}
 {sg_toggle("开机自启", "开启后 KeyHeatmap 会随 Windows 开机自动启动，无需手动打开。", autostart_on, "已启用", "已关闭", "toggle_autostart")}
+{sg_toggle("应用统计", "记录每个应用使用了多少次按键，并参与云端今日应用榜。只记录应用名，不上传窗口标题。", app_stats_on, "已启用", "已关闭", "toggle_app_stats")}
     </div>
 
     <div class="card">
@@ -2981,6 +3225,17 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             self._json_response({"ranking": ranking})
             return True
 
+        if path == "/api/stats/apps":
+            params = self._parse_query()
+            period = params.get("period", ["today"])[0]
+            apps = self.stats.get_app_ranking(period, top_n=30)
+            self._json_response({
+                "period": period,
+                "apps": [{"name": n, "count": c} for n, c in apps],
+                "enabled": bool(self.settings.get("app_stats_enabled", True)),
+            })
+            return True
+
         if path == "/api/user":
             params = self._parse_query()
             device_id = params.get("device_id", [""])[0]
@@ -3024,6 +3279,17 @@ class HeatmapHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": str(result), "ranking": None})
             return True
 
+        if path == "/api/app-leaderboard/cloud":
+            params = self._parse_query()
+            target_date = params.get("target_date", [None])[0]
+            limit = int(params.get("limit", ["30"])[0])
+            ok, result = api_get_app_leaderboard(target_date, limit)
+            if ok:
+                self._json_response(result)
+            else:
+                self._json_response({"error": str(result), "apps": None})
+            return True
+
         if path == "/api/toggle_mouse_tracking":
             current = self.settings.get("mouse_tracking_enabled", False)
             self.settings.set("mouse_tracking_enabled", not current)
@@ -3034,6 +3300,12 @@ class HeatmapHandler(BaseHTTPRequestHandler):
             current = self.settings.get("leaderboard_include_mouse", True)
             self.settings.set("leaderboard_include_mouse", not current)
             self._json_response({"leaderboard_include_mouse": not current})
+            return True
+
+        if path == "/api/toggle_app_stats":
+            current = self.settings.get("app_stats_enabled", True)
+            self.settings.set("app_stats_enabled", not current)
+            self._json_response({"app_stats_enabled": not current})
             return True
 
         if path == "/api/tray/state":
@@ -3711,11 +3983,13 @@ class HeatmapServer:
         today = datetime.now().strftime("%Y-%m-%d")
         # 只上传当天数据（覆盖式），不再传昨天，节省云空间
         dates_to_sync = []
+        app_items = []
         with self.stats.lock:
             daily = self.stats.stats.get("daily", {})
+            app_daily = self.stats.stats.get("app_daily", {})
         if today in daily and daily[today]:
             dates_to_sync.append(today)
-        if not dates_to_sync:
+        if not dates_to_sync and not app_daily.get(today):
             return
         all_items = []
         for date_str in dates_to_sync:
@@ -3726,7 +4000,15 @@ class HeatmapServer:
                     "key_name": key_name,
                     "count": count,
                 })
-        ok, result = api_upload_stats(all_items)
+        if self.settings.get("app_stats_enabled", True):
+            for app_name, count in app_daily.get(today, {}).items():
+                app_items.append({
+                    "user_id": user_id,
+                    "stat_date": today,
+                    "app_name": app_name,
+                    "count": count,
+                })
+        ok, result = api_upload_stats(all_items, apps=app_items or None)
         if ok:
             with self.stats.lock:
                 if "cloud_synced" not in self.stats.stats:
@@ -3977,6 +4259,9 @@ class KeyListener:
             name = self.stats.get_display_name(key)
             if name:
                 self.stats.record(name)
+                if not self.settings or self.settings.get("app_stats_enabled", True):
+                    app_name = resolve_app_name(self._get_foreground_process_name())
+                    self.stats.record_app(app_name)
                 self._key_count += 1
                 self._log_count += 1
                 if self._log_count <= 10 or self._log_count % 200 == 0:
@@ -3992,6 +4277,9 @@ class KeyListener:
             if not self._should_count_key():
                 return
             self.stats.record(name)
+            if not self.settings or self.settings.get("app_stats_enabled", True):
+                app_name = resolve_app_name(self._get_foreground_process_name())
+                self.stats.record_app(app_name)
             self._key_count += 1
             self._log_count += 1
             if self._log_count <= 10 or self._log_count % 200 == 0:
